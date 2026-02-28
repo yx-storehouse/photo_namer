@@ -1045,6 +1045,53 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
     }
   }
 
+  Future<void> _exportMeterData() async {
+    try {
+      final data = {
+        'version': 1,
+        'exportedAt': DateTime.now().toIso8601String(),
+        'rooms': _rooms.map((r) => r.toJson()).toList(),
+      };
+
+      final dir = await getTemporaryDirectory();
+      final file = File(path.join(dir.path, '抄表数据_${DateTime.now().millisecondsSinceEpoch}.json'));
+      await file.writeAsString(const JsonEncoder.withIndent('  ').convert(data));
+
+      await Share.shareXFiles([XFile(file.path)], text: '抄表数据导出');
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('抄表数据导出失败: $e')));
+    }
+  }
+
+  Future<void> _clearMeterValues() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('一键清空抄表数据'),
+        content: const Text('将清空所有房间设备的抄表数值，房间和设备配置会保留，确定继续吗？'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('清空')),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    setState(() {
+      for (final room in _rooms) {
+        for (final device in room.devices) {
+          device.values = List<String>.from(MeterDevice.defaultMeterValues());
+        }
+      }
+    });
+    await widget.onSave(_rooms);
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已清空抄表数据')));
+  }
+
   @override
   void initState() {
     super.initState();
@@ -1119,6 +1166,8 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
         actions: [
           IconButton(onPressed: _importRoomConfig, icon: const Icon(Icons.file_download_outlined), tooltip: '导入配置'),
           IconButton(onPressed: _exportRoomConfig, icon: const Icon(Icons.file_upload_outlined), tooltip: '导出配置'),
+          IconButton(onPressed: _exportMeterData, icon: const Icon(Icons.data_object_outlined), tooltip: '导出抄表数据'),
+          IconButton(onPressed: _clearMeterValues, icon: const Icon(Icons.cleaning_services_outlined), tooltip: '一键清空抄表数据'),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
