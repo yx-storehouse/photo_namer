@@ -56,6 +56,58 @@ class InspectionItem {
 
 enum ConflictStrategy { overwrite, increment }
 
+class MeterDevice {
+  String name;
+  List<String> values;
+
+  static List<String> defaultMeterValues() => ['220', '220', '220', '0', '0', '0'];
+
+  MeterDevice({required this.name, List<String>? values})
+      : values = values ?? List<String>.from(defaultMeterValues());
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'values': values,
+      };
+
+  factory MeterDevice.fromJson(Map<String, dynamic> json) => MeterDevice(
+        name: json['name'] ?? '',
+        values: List<String>.from(json['values'] ?? defaultMeterValues()),
+      );
+}
+
+class MeterRoom {
+  int roomId;
+  String roomName;
+  String roomType;
+  String location;
+  List<MeterDevice> devices;
+
+  MeterRoom({
+    required this.roomId,
+    required this.roomName,
+    required this.roomType,
+    required this.location,
+    required this.devices,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'roomId': roomId,
+        'roomName': roomName,
+        'roomType': roomType,
+        'location': location,
+        'devices': devices.map((e) => e.toJson()).toList(),
+      };
+
+  factory MeterRoom.fromJson(Map<String, dynamic> json) => MeterRoom(
+        roomId: json['roomId'],
+        roomName: json['roomName'] ?? '',
+        roomType: json['roomType'] ?? '',
+        location: json['location'] ?? '',
+        devices: (json['devices'] as List<dynamic>? ?? []).map((e) => MeterDevice.fromJson(e)).toList(),
+      );
+}
+
 // -------------------- App --------------------
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -105,12 +157,14 @@ class _HomePageState extends State<HomePage> {
   static const String _prefSaveDirKey = 'save_directory_path';
   static const String _prefStrategyKey = 'conflict_strategy';
   static const String _prefSortByKey = 'sort_by';
+  static const String _prefMeterRoomsKey = 'meter_rooms';
 
   List<InspectionItem> _items = [];
   String _saveFolderName = 'PhotoNamer';
   String? _saveDirectoryPath;
   ConflictStrategy _strategy = ConflictStrategy.increment;
   String _sortBy = 'serial';
+  List<MeterRoom> _meterRooms = [];
 
   final TextEditingController _searchCtrl = TextEditingController();
   String _floorFilter = '全部';
@@ -151,6 +205,22 @@ class _HomePageState extends State<HomePage> {
       _items = _defaultItemsFromDataTs();
       await _saveData();
     }
+
+    final String? meterRoomsJson = prefs.getString(_prefMeterRoomsKey);
+    if (meterRoomsJson != null) {
+      final List<dynamic> decoded = jsonDecode(meterRoomsJson);
+      _meterRooms = decoded.map((e) => MeterRoom.fromJson(e)).toList();
+    }
+
+    // 安装默认模板：当不存在或为空时，自动将所有“低压配电室”加入抄表模式
+    if (_meterRooms.isEmpty) {
+      _meterRooms = _items
+          .where((e) => e.type == '低压配电室')
+          .map(_buildMeterRoomFromInspection)
+          .toList();
+      await _saveData();
+    }
+
     _recalculateDisplayData();
   }
 
@@ -243,6 +313,63 @@ class _HomePageState extends State<HomePage> {
     }
     await prefs.setString(_prefStrategyKey, _strategy.name);
     await prefs.setString(_prefSortByKey, _sortBy);
+    await prefs.setString(_prefMeterRoomsKey, jsonEncode(_meterRooms.map((e) => e.toJson()).toList()));
+  }
+
+  String _defaultMeterRoomNameTemplate(InspectionItem it) {
+    // 房间级模板：默认使用“位置 + 类型 + 编号”作为抄表房间名
+    final parts = <String>[];
+    if (it.location.trim().isNotEmpty && it.location != '-') parts.add(it.location.trim());
+    if (it.type.trim().isNotEmpty) parts.add(it.type.trim());
+    if (it.serial.trim().isNotEmpty) parts.add(it.serial.trim());
+    return parts.isEmpty ? it.name : parts.join('-');
+  }
+
+  List<MeterDevice> _defaultMeterDevicesTemplateByRoomType(String roomType) {
+    // 统一设备模板：8个UPS + 2个进线柜
+    return [
+      MeterDevice(name: 'UPS-1'),
+      MeterDevice(name: 'UPS-2'),
+      MeterDevice(name: 'UPS-3'),
+      MeterDevice(name: 'UPS-4'),
+      MeterDevice(name: 'UPS-5'),
+      MeterDevice(name: 'UPS-6'),
+      MeterDevice(name: 'UPS-7'),
+      MeterDevice(name: 'UPS-8'),
+      MeterDevice(name: '进线柜-1'),
+      MeterDevice(name: '进线柜-2'),
+    ];
+  }
+
+  MeterRoom _buildMeterRoomFromInspection(InspectionItem it) {
+    return MeterRoom(
+      roomId: it.id,
+      roomName: _defaultMeterRoomNameTemplate(it),
+      roomType: it.type,
+      location: it.location,
+      devices: _defaultMeterDevicesTemplateByRoomType(it.type),
+    );
+  }
+
+  Future<void> _openMeterFeature() async {
+    final result = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MeterRoomsPage(
+          allInspectionItems: _items,
+          meterRooms: _meterRooms,
+          onSave: (rooms) async {
+            _meterRooms = rooms;
+            await _saveData();
+          },
+          onCreateRoomFromInspection: _buildMeterRoomFromInspection,
+        ),
+      ),
+    );
+
+    if (result == true && mounted) {
+      setState(() {});
+    }
   }
 
   List<InspectionItem> _defaultItemsFromDataTs() {
@@ -692,6 +819,7 @@ class _HomePageState extends State<HomePage> {
         centerTitle: false,
         backgroundColor: const Color(0xFFF6F8FC),
         actions: [
+          IconButton(onPressed: _openMeterFeature, icon: const Icon(Icons.fact_check_outlined), tooltip: '动力抄表'),
           IconButton(onPressed: () => _showConfigSheet(context), icon: const Icon(Icons.tune)),
           IconButton(
             onPressed: () async {
@@ -824,6 +952,502 @@ class _HomePageState extends State<HomePage> {
             )),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class MeterRoomsPage extends StatefulWidget {
+  final List<InspectionItem> allInspectionItems;
+  final List<MeterRoom> meterRooms;
+  final Future<void> Function(List<MeterRoom>) onSave;
+  final MeterRoom Function(InspectionItem item) onCreateRoomFromInspection;
+
+  const MeterRoomsPage({
+    super.key,
+    required this.allInspectionItems,
+    required this.meterRooms,
+    required this.onSave,
+    required this.onCreateRoomFromInspection,
+  });
+
+  @override
+  State<MeterRoomsPage> createState() => _MeterRoomsPageState();
+}
+
+class _MeterRoomsPageState extends State<MeterRoomsPage> {
+  late List<MeterRoom> _rooms;
+
+  Future<void> _exportRoomConfig() async {
+    try {
+      final data = {
+        'version': 1,
+        'exportedAt': DateTime.now().toIso8601String(),
+        'rooms': _rooms
+            .map((r) => {
+                  'roomId': r.roomId,
+                  'roomName': r.roomName,
+                  'roomType': r.roomType,
+                  'location': r.location,
+                  'devices': r.devices.map((d) => {'name': d.name}).toList(),
+                })
+            .toList(),
+      };
+
+      final dir = await getTemporaryDirectory();
+      final file = File(path.join(dir.path, '抄表房间配置_${DateTime.now().millisecondsSinceEpoch}.json'));
+      await file.writeAsString(const JsonEncoder.withIndent('  ').convert(data));
+
+      await Share.shareXFiles([XFile(file.path)], text: '抄表房间配置导出');
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导出失败: $e')));
+    }
+  }
+
+  Future<void> _importRoomConfig() async {
+    try {
+      final picked = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['json']);
+      if (picked == null || picked.files.single.path == null) return;
+
+      final filePath = picked.files.single.path!;
+      final text = await File(filePath).readAsString();
+      final decoded = jsonDecode(text);
+      final List<dynamic> rooms = (decoded is Map<String, dynamic>) ? (decoded['rooms'] as List<dynamic>? ?? []) : [];
+      if (rooms.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('导入文件无有效房间配置')));
+        return;
+      }
+
+      final imported = rooms.map((e) {
+        final m = e as Map<String, dynamic>;
+        final List<dynamic> ds = m['devices'] as List<dynamic>? ?? [];
+        return MeterRoom(
+          roomId: m['roomId'] is int ? m['roomId'] : DateTime.now().millisecondsSinceEpoch,
+          roomName: (m['roomName'] ?? '').toString(),
+          roomType: (m['roomType'] ?? '').toString(),
+          location: (m['location'] ?? '').toString(),
+          devices: ds
+              .map((d) => MeterDevice(name: ((d as Map<String, dynamic>)['name'] ?? '未命名设备').toString()))
+              .toList(),
+        );
+      }).toList();
+
+      setState(() => _rooms = imported);
+      await widget.onSave(_rooms);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已导入 ${_rooms.length} 个房间配置')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导入失败: $e')));
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _rooms = widget.meterRooms
+        .map((e) => MeterRoom(
+              roomId: e.roomId,
+              roomName: e.roomName,
+              roomType: e.roomType,
+              location: e.location,
+              devices: e.devices.map((d) => MeterDevice(name: d.name, values: List<String>.from(d.values))).toList(),
+            ))
+        .toList();
+  }
+
+  Future<void> _pickRoomAndAdd() async {
+    final exists = _rooms.map((e) => e.roomId).toSet();
+    final candidates = widget.allInspectionItems.where((e) => !exists.contains(e.id)).toList();
+    if (candidates.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('没有可新增的房间了')));
+      return;
+    }
+
+    InspectionItem? selected;
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('选择房间加入抄表'),
+        content: StatefulBuilder(
+          builder: (context, setStateDialog) => SizedBox(
+            width: 360,
+            height: 420,
+            child: ListView.builder(
+              itemCount: candidates.length,
+              itemBuilder: (context, index) {
+                final it = candidates[index];
+                return RadioListTile<int>(
+                  value: it.id,
+                  groupValue: selected?.id,
+                  onChanged: (_) => setStateDialog(() => selected = it),
+                  title: Text(it.serial),
+                  subtitle: Text('${it.location} · ${it.type}'),
+                );
+              },
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+          TextButton(
+            onPressed: () {
+              if (selected != null) Navigator.pop(context);
+            },
+            child: const Text('加入'),
+          ),
+        ],
+      ),
+    );
+
+    if (selected == null) return;
+    setState(() {
+      _rooms.add(widget.onCreateRoomFromInspection(selected!));
+    });
+    await widget.onSave(_rooms);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('动力抄表'),
+        actions: [
+          IconButton(onPressed: _importRoomConfig, icon: const Icon(Icons.file_download_outlined), tooltip: '导入配置'),
+          IconButton(onPressed: _exportRoomConfig, icon: const Icon(Icons.file_upload_outlined), tooltip: '导出配置'),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _pickRoomAndAdd,
+        icon: const Icon(Icons.add),
+        label: const Text('添加房间'),
+      ),
+      body: _rooms.isEmpty
+          ? const Center(child: Text('还没有抄表房间\n点击右下角添加', textAlign: TextAlign.center))
+          : GridView.builder(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                crossAxisSpacing: 14,
+                mainAxisSpacing: 14,
+                childAspectRatio: 0.95,
+              ),
+              itemCount: _rooms.length,
+              itemBuilder: (context, index) {
+                final room = _rooms[index];
+                return _RoomCard(
+                  serial: room.roomName,
+                  location: room.location,
+                  isCompleted: false,
+                  onTap: () async {
+                    await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => MeterDetailPage(
+                          room: room,
+                          onChanged: () async {
+                            await widget.onSave(_rooms);
+                            if (mounted) setState(() {});
+                          },
+                        ),
+                      ),
+                    );
+                  },
+                  onLongPress: () async {
+                    final del = await showDialog<bool>(
+                      context: context,
+                      builder: (context) => AlertDialog(
+                        title: const Text('移除房间'),
+                        content: Text('确定移除 ${room.roomName} 吗？'),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+                          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('移除')),
+                        ],
+                      ),
+                    );
+                    if (del == true) {
+                      setState(() => _rooms.removeAt(index));
+                      await widget.onSave(_rooms);
+                    }
+                  },
+                );
+              },
+            ),
+    );
+  }
+}
+
+class MeterDetailPage extends StatefulWidget {
+  final MeterRoom room;
+  final Future<void> Function() onChanged;
+  const MeterDetailPage({super.key, required this.room, required this.onChanged});
+
+  @override
+  State<MeterDetailPage> createState() => _MeterDetailPageState();
+}
+
+class _MeterDetailPageState extends State<MeterDetailPage> {
+  final Map<String, FocusNode> _focusNodes = {};
+  final Map<String, TextEditingController> _valueControllers = {};
+  int _nextDeviceIndexForCurrent = 0;
+  int _nextCurrentFieldIndex = 3;
+
+  FocusNode _focusNodeFor(int deviceIndex, int fieldIndex) {
+    final key = '$deviceIndex-$fieldIndex';
+    return _focusNodes.putIfAbsent(key, () => FocusNode());
+  }
+
+  TextEditingController _controllerFor(int deviceIndex, int fieldIndex, String value) {
+    final key = '$deviceIndex-$fieldIndex';
+    return _valueControllers.putIfAbsent(key, () => TextEditingController(text: value));
+  }
+
+  @override
+  void dispose() {
+    for (final node in _focusNodes.values) {
+      node.dispose();
+    }
+    for (final controller in _valueControllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _editRoomName() async {
+    final ctrl = TextEditingController(text: widget.room.roomName);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('编辑房间名称'),
+        content: TextField(controller: ctrl, decoration: const InputDecoration(hintText: '房间名')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok == true) {
+      setState(() => widget.room.roomName = ctrl.text.trim().isEmpty ? widget.room.roomName : ctrl.text.trim());
+      await widget.onChanged();
+    }
+  }
+
+  Future<void> _addDevice() async {
+    final ctrl = TextEditingController(text: 'UPS-${widget.room.devices.length + 1}');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('新增设备'),
+        content: TextField(controller: ctrl, decoration: const InputDecoration(hintText: '例如 UPS-3 / 进线柜-2')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('添加')),
+        ],
+      ),
+    );
+    if (ok == true) {
+      setState(() => widget.room.devices.add(MeterDevice(name: ctrl.text.trim().isEmpty ? '未命名设备' : ctrl.text.trim())));
+      await widget.onChanged();
+    }
+  }
+
+  Future<void> _showDeviceSettingsDialog(int index) async {
+    final device = widget.room.devices[index];
+    final nameCtrl = TextEditingController(text: device.name);
+    final action = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('设备设置'),
+        content: TextField(
+          controller: nameCtrl,
+          decoration: const InputDecoration(labelText: '设备名称 (UPS/进线柜)'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'delete'),
+            child: const Text('删除设备', style: TextStyle(color: Colors.red)),
+          ),
+          TextButton(onPressed: () => Navigator.pop(context, 'cancel'), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(context, 'save'), child: const Text('保存')),
+        ],
+      ),
+    );
+
+    if (action == 'save') {
+      setState(() => device.name = nameCtrl.text.trim().isEmpty ? device.name : nameCtrl.text.trim());
+      await widget.onChanged();
+    } else if (action == 'delete') {
+      setState(() => widget.room.devices.removeAt(index));
+      await widget.onChanged();
+    }
+  }
+
+  void _focusNextCurrentGlobal() {
+    if (widget.room.devices.isEmpty) return;
+
+    if (_nextDeviceIndexForCurrent >= widget.room.devices.length) {
+      _nextDeviceIndexForCurrent = 0;
+    }
+
+    final deviceIndex = _nextDeviceIndexForCurrent;
+    final fieldIndex = _nextCurrentFieldIndex;
+
+    final controller = _controllerFor(deviceIndex, fieldIndex, widget.room.devices[deviceIndex].values[fieldIndex]);
+    controller.selection = TextSelection(baseOffset: 0, extentOffset: controller.text.length);
+    FocusScope.of(context).requestFocus(_focusNodeFor(deviceIndex, fieldIndex));
+
+    if (_nextCurrentFieldIndex == 5) {
+      _nextCurrentFieldIndex = 3;
+      _nextDeviceIndexForCurrent = (_nextDeviceIndexForCurrent + 1) % widget.room.devices.length;
+    } else {
+      _nextCurrentFieldIndex += 1;
+    }
+  }
+
+  Widget _buildValueInput({
+    required String label,
+    required int deviceIndex,
+    required int fieldIndex,
+    required String value,
+    required ValueChanged<String> onChanged,
+  }) {
+    final focusNode = _focusNodeFor(deviceIndex, fieldIndex);
+    final controller = _controllerFor(deviceIndex, fieldIndex, value);
+    if (controller.text != value) {
+      controller.text = value;
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: const TextStyle(fontSize: 12, color: Colors.black54)),
+        const SizedBox(height: 6),
+        TextFormField(
+          focusNode: focusNode,
+          controller: controller,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(
+            isDense: true,
+            border: OutlineInputBorder(),
+            contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          ),
+          onChanged: onChanged,
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('抄表 - ${widget.room.roomName}'),
+        actions: [IconButton(onPressed: _editRoomName, icon: const Icon(Icons.edit))],
+      ),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          FloatingActionButton.extended(
+            onPressed: _focusNextCurrentGlobal,
+            icon: const Icon(Icons.arrow_downward_rounded),
+            label: const Text('下一个电流输入框'),
+          ),
+          const SizedBox(height: 10),
+          FloatingActionButton.extended(
+            onPressed: _addDevice,
+            icon: const Icon(Icons.add),
+            label: const Text('新增UPS/进线柜'),
+          ),
+        ],
+      ),
+      body: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
+        itemCount: widget.room.devices.length,
+        itemBuilder: (context, index) {
+          final device = widget.room.devices[index];
+          return Card(
+            margin: const EdgeInsets.only(bottom: 12),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          device.name,
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: () => _showDeviceSettingsDialog(index),
+                        icon: const Icon(Icons.settings_outlined),
+                      )
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  GridView.count(
+                    crossAxisCount: 3,
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    mainAxisSpacing: 10,
+                    crossAxisSpacing: 10,
+                    childAspectRatio: 1.8,
+                    children: [
+                      _buildValueInput(
+                        label: '电压A(V)',
+                        deviceIndex: index,
+                        fieldIndex: 0,
+                        value: device.values[0],
+                        onChanged: (v) async { device.values[0] = v; await widget.onChanged(); },
+                      ),
+                      _buildValueInput(
+                        label: '电压B(V)',
+                        deviceIndex: index,
+                        fieldIndex: 1,
+                        value: device.values[1],
+                        onChanged: (v) async { device.values[1] = v; await widget.onChanged(); },
+                      ),
+                      _buildValueInput(
+                        label: '电压C(V)',
+                        deviceIndex: index,
+                        fieldIndex: 2,
+                        value: device.values[2],
+                        onChanged: (v) async { device.values[2] = v; await widget.onChanged(); },
+                      ),
+                      _buildValueInput(
+                        label: '电流A(A)',
+                        deviceIndex: index,
+                        fieldIndex: 3,
+                        value: device.values[3],
+                        onChanged: (v) async { device.values[3] = v; await widget.onChanged(); },
+                      ),
+                      _buildValueInput(
+                        label: '电流B(A)',
+                        deviceIndex: index,
+                        fieldIndex: 4,
+                        value: device.values[4],
+                        onChanged: (v) async { device.values[4] = v; await widget.onChanged(); },
+                      ),
+                      _buildValueInput(
+                        label: '电流C(A)',
+                        deviceIndex: index,
+                        fieldIndex: 5,
+                        value: device.values[5],
+                        onChanged: (v) async { device.values[5] = v; await widget.onChanged(); },
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
       ),
     );
   }
