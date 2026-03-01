@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -12,6 +13,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:archive/archive_io.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 
 // -------------------- Models --------------------
 class InspectionItem {
@@ -358,6 +360,7 @@ class _HomePageState extends State<HomePage> {
         builder: (_) => MeterRoomsPage(
           allInspectionItems: _items,
           meterRooms: _meterRooms,
+          cameras: widget.cameras,
           onSave: (rooms) async {
             _meterRooms = rooms;
             await _saveData();
@@ -960,6 +963,7 @@ class _HomePageState extends State<HomePage> {
 class MeterRoomsPage extends StatefulWidget {
   final List<InspectionItem> allInspectionItems;
   final List<MeterRoom> meterRooms;
+  final List<CameraDescription> cameras;
   final Future<void> Function(List<MeterRoom>) onSave;
   final MeterRoom Function(InspectionItem item) onCreateRoomFromInspection;
 
@@ -967,6 +971,7 @@ class MeterRoomsPage extends StatefulWidget {
     super.key,
     required this.allInspectionItems,
     required this.meterRooms,
+    required this.cameras,
     required this.onSave,
     required this.onCreateRoomFromInspection,
   });
@@ -1198,6 +1203,7 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
                       MaterialPageRoute(
                         builder: (_) => MeterDetailPage(
                           room: room,
+                          cameras: widget.cameras,
                           onChanged: () async {
                             await widget.onSave(_rooms);
                             if (mounted) setState(() {});
@@ -1232,8 +1238,9 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
 
 class MeterDetailPage extends StatefulWidget {
   final MeterRoom room;
+  final List<CameraDescription> cameras;
   final Future<void> Function() onChanged;
-  const MeterDetailPage({super.key, required this.room, required this.onChanged});
+  const MeterDetailPage({super.key, required this.room, required this.cameras, required this.onChanged});
 
   @override
   State<MeterDetailPage> createState() => _MeterDetailPageState();
@@ -1244,6 +1251,12 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
   final Map<String, TextEditingController> _valueControllers = {};
   int _nextDeviceIndexForCurrent = 0;
   int _nextCurrentFieldIndex = 3;
+
+  String _lastOcrRawText = '';
+  List<String> _lastOcrNumbers = [];
+  List<String> _lastOcrFocusLines = [];
+
+  static const Rect _ocrFocusRectNormalized = Rect.fromLTWH(0.22, 0.32, 0.56, 0.36);
 
   FocusNode _focusNodeFor(int deviceIndex, int fieldIndex) {
     final key = '$deviceIndex-$fieldIndex';
@@ -1335,6 +1348,335 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
     }
   }
 
+  bool _isLikelyCurrentValue(String raw) {
+    final v = double.tryParse(_normalizeOcrNumber(raw));
+    if (v == null) return false;
+    return v >= 0 && v <= 600;
+  }
+
+  String _normalizeOcrNumber(String raw) {
+    var s = raw.trim().replaceAll(',', '.');
+    if (!s.contains('.') && s.length >= 4) {
+      final v = int.tryParse(s);
+      if (v != null && v >= 1000 && v <= 9999) {
+        s = '${s.substring(0, s.length - 1)}.${s.substring(s.length - 1)}';
+      }
+    }
+    return s;
+  }
+
+  List<String> _numbersFromLine(String line) {
+    final numberReg = RegExp(r'[-+]?\d+(?:[\.,]\d+)?');
+    return numberReg
+        .allMatches(line)
+        .map((m) => _normalizeOcrNumber(m.group(0)!))
+        .toList();
+  }
+
+  bool _isPowerFactorLike(String raw) {
+    final v = double.tryParse(_normalizeOcrNumber(raw));
+    if (v == null) return false;
+    return v > 0 && v < 1.2;
+  }
+
+  List<String>? _pickThreeCurrentLike(List<String> source) {
+    final filtered = source.where((n) => _isLikelyCurrentValue(n) && !_isPowerFactorLike(n)).toList();
+    if (filtered.length >= 3) return filtered.take(3).toList();
+    return null;
+  }
+
+  bool _isLikelyPhaseVoltage(String raw) {
+    final v = double.tryParse(_normalizeOcrNumber(raw));
+    if (v == null) return false;
+    return v >= 180 && v <= 260;
+  }
+
+  List<String>? _extractByVoltageRowThenNextRow(List<String> lines) {
+    for (int i = 0; i + 1 < lines.length; i++) {
+      final row = _numbersFromLine(lines[i]);
+      final next = _numbersFromLine(lines[i + 1]);
+      if (row.length < 3 || next.length < 3) continue;
+
+      final voltageRow = row.take(3).every(_isLikelyPhaseVoltage);
+      if (!voltageRow) continue;
+
+      final picked = _pickThreeCurrentLike(next.take(3).toList());
+      if (picked != null) {
+        _lastOcrFocusLines = [lines[i], lines[i + 1]];
+        return picked;
+      }
+    }
+    return null;
+  }
+
+  List<String>? _extractByVerticalColumnsUnder220(List<String> lines) {
+    final result = <String>[];
+    final focus = <String>[];
+
+    for (int i = 0; i + 1 < lines.length; i++) {
+      final top = _numbersFromLine(lines[i]);
+      final below = _numbersFromLine(lines[i + 1]);
+      if (top.length != 1 || below.length != 1) continue;
+      if (!_isLikelyPhaseVoltage(top.first)) continue;
+
+      final vBelow = double.tryParse(_normalizeOcrNumber(below.first));
+      if (vBelow == null) continue;
+      if (vBelow <= 1.2 || vBelow > 600) continue;
+
+      result.add(_normalizeOcrNumber(below.first));
+      focus.add(lines[i]);
+      focus.add(lines[i + 1]);
+      if (result.length >= 3) {
+        _lastOcrFocusLines = focus;
+        return result.take(3).toList();
+      }
+    }
+
+    return null;
+  }
+
+  List<String> _extractCurrentCandidates(String text) {
+    final lines = text
+        .split(RegExp(r'\r?\n'))
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+
+    _lastOcrFocusLines = [];
+
+    final keywordCurrent = RegExp(r'(电流|相电流|current|curr|\bia\b|\bib\b|\bic\b|\bi\b)', caseSensitive: false);
+    final skipKeyword = RegExp(r'(Hz|频率|功率因数|PF|kvar|kw|kva|负载率|有功|视在|合计|总功率)', caseSensitive: false);
+
+    // 1) 先按“220.*下一行就是电流”规则抽取（你最新两组日志对应这个规律）
+    final byVoltageRow = _extractByVoltageRowThenNextRow(lines);
+    if (byVoltageRow != null) return byVoltageRow;
+
+    // 2) 再按“每个220下面一个值”的竖列规则抽取
+    final byColumns = _extractByVerticalColumnsUnder220(lines);
+    if (byColumns != null) return byColumns;
+
+    // 3) 有标签时，按“电流”关键词附近纵向抽取
+    for (int i = 0; i < lines.length; i++) {
+      if (!keywordCurrent.hasMatch(lines[i])) continue;
+      final pool = <String>[];
+      for (int j = i; j <= i + 7 && j < lines.length; j++) {
+        pool.addAll(_numbersFromLine(lines[j]));
+      }
+      final picked = _pickThreeCurrentLike(pool);
+      if (picked != null) {
+        _lastOcrFocusLines = [
+          lines[i],
+          for (int j = i + 1; j <= i + 4 && j < lines.length; j++) lines[j],
+        ];
+        return picked;
+      }
+    }
+
+    // 4) 最终兜底：仅使用纵向滑窗，且跳过明显非电流行
+    for (int start = 0; start < lines.length; start++) {
+      final window = <String>[];
+      final focus = <String>[];
+      for (int j = start; j < start + 5 && j < lines.length; j++) {
+        if (skipKeyword.hasMatch(lines[j])) continue;
+        focus.add(lines[j]);
+        window.addAll(_numbersFromLine(lines[j]));
+      }
+      final picked = _pickThreeCurrentLike(window);
+      if (picked != null) {
+        _lastOcrFocusLines = focus;
+        return picked;
+      }
+    }
+
+    final allNumbers = _numbersFromLine(text).where((n) => !_isPowerFactorLike(n)).toList();
+    if (allNumbers.length <= 3) return allNumbers;
+    return allNumbers.sublist(0, 3);
+  }
+
+  Future<void> _showOcrDebugDialog() async {
+    if (!mounted) return;
+
+    final numbersText = _lastOcrNumbers.isEmpty ? '（无）' : _lastOcrNumbers.join(', ');
+    final focusText = _lastOcrFocusLines.isEmpty ? '（无）' : _lastOcrFocusLines.join('\n');
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('OCR 调试结果'),
+        content: SizedBox(
+          width: 520,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('识别到的全部数字：', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                SelectableText(numbersText),
+                const SizedBox(height: 12),
+                const Text('用于判定的关键行：', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.lightBlue.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: SelectableText(focusText),
+                ),
+                const SizedBox(height: 12),
+                const Text('原始 OCR 文本：', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.black12,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: SelectableText(_lastOcrRawText.isEmpty ? '（无）' : _lastOcrRawText),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<String?> _buildCroppedImageFilePath(String originalPath, Rect normalizedRect) async {
+    try {
+      final bytes = await File(originalPath).readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      final srcImage = frame.image;
+
+      final width = srcImage.width.toDouble();
+      final height = srcImage.height.toDouble();
+
+      final left = (normalizedRect.left * width).clamp(0.0, width - 1);
+      final top = (normalizedRect.top * height).clamp(0.0, height - 1);
+      final right = (normalizedRect.right * width).clamp(left + 1, width);
+      final bottom = (normalizedRect.bottom * height).clamp(top + 1, height);
+
+      final srcRect = Rect.fromLTRB(left, top, right, bottom);
+      final targetW = srcRect.width.round();
+      final targetH = srcRect.height.round();
+
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      final dstRect = Rect.fromLTWH(0, 0, targetW.toDouble(), targetH.toDouble());
+      canvas.drawImageRect(srcImage, srcRect, dstRect, Paint());
+      final picture = recorder.endRecording();
+      final cropped = await picture.toImage(targetW, targetH);
+      final data = await cropped.toByteData(format: ui.ImageByteFormat.png);
+      if (data == null) return null;
+
+      final dir = await getTemporaryDirectory();
+      final outPath = path.join(dir.path, 'ocr_crop_${DateTime.now().millisecondsSinceEpoch}.png');
+      await File(outPath).writeAsBytes(data.buffer.asUint8List(), flush: true);
+      return outPath;
+    } catch (e) {
+      debugPrint('build crop image error: $e');
+      return null;
+    }
+  }
+
+  Future<void> _recognizeCurrentFromCamera(int deviceIndex) async {
+    if (widget.cameras.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('未检测到相机')));
+      return;
+    }
+
+    final cameraStatus = await Permission.camera.request();
+    if (!cameraStatus.isGranted) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先授予相机权限')));
+      return;
+    }
+
+    final XFile? photo = await Navigator.push<XFile?>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => MeterOcrCameraPage(camera: widget.cameras.first, title: widget.room.devices[deviceIndex].name),
+      ),
+    );
+
+    if (photo == null) return;
+
+    final recognizerCn = TextRecognizer(script: TextRecognitionScript.chinese);
+    final recognizerLatin = TextRecognizer(script: TextRecognitionScript.latin);
+    try {
+      final croppedPath = await _buildCroppedImageFilePath(photo.path, _ocrFocusRectNormalized);
+      final inputImage = InputImage.fromFilePath(croppedPath ?? photo.path);
+      final fullImage = InputImage.fromFilePath(photo.path);
+
+      String text = '';
+
+      try {
+        final resultCn = await recognizerCn.processImage(inputImage);
+        text = resultCn.text.trim();
+      } catch (e) {
+        debugPrint('Chinese OCR failed, fallback to latin: $e');
+      }
+
+      if (text.isEmpty) {
+        final resultLatin = await recognizerLatin.processImage(inputImage);
+        text = resultLatin.text;
+      }
+
+      if (text.trim().isEmpty) {
+        final retryCn = await recognizerCn.processImage(fullImage);
+        text = retryCn.text.trim();
+      }
+      if (text.trim().isEmpty) {
+        final retryLatin = await recognizerLatin.processImage(fullImage);
+        text = retryLatin.text;
+      }
+
+      final allNumbers = RegExp(r'[-+]?\d+(?:[\.,]\d+)?').allMatches(text).map((m) => _normalizeOcrNumber(m.group(0)!)).toList();
+      final matches = _extractCurrentCandidates(text);
+
+      setState(() {
+        _lastOcrRawText = text;
+        _lastOcrNumbers = allNumbers;
+      });
+
+      if (matches.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('未识别到电流数值')));
+        return;
+      }
+
+      final device = widget.room.devices[deviceIndex];
+      for (int i = 0; i < 3 && i < matches.length; i++) {
+        final value = _normalizeOcrNumber(matches[i]);
+        final targetIndex = 3 + i;
+        device.values[targetIndex] = value;
+        _controllerFor(deviceIndex, targetIndex, value).text = value;
+      }
+
+      await widget.onChanged();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('识别完成，候选:${matches.join('/')}（可点右上角查看完整 OCR）')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('识别失败: $e')));
+    } finally {
+      recognizerCn.close();
+      recognizerLatin.close();
+    }
+  }
+
   void _focusNextCurrentGlobal() {
     if (widget.room.devices.isEmpty) return;
 
@@ -1395,7 +1737,14 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text('抄表 - ${widget.room.roomName}'),
-        actions: [IconButton(onPressed: _editRoomName, icon: const Icon(Icons.edit))],
+        actions: [
+          IconButton(
+            onPressed: _showOcrDebugDialog,
+            icon: const Icon(Icons.bug_report_outlined),
+            tooltip: '查看 OCR 调试结果',
+          ),
+          IconButton(onPressed: _editRoomName, icon: const Icon(Icons.edit)),
+        ],
       ),
       floatingActionButton: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1432,6 +1781,11 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
                           device.name,
                           style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                         ),
+                      ),
+                      IconButton(
+                        onPressed: () => _recognizeCurrentFromCamera(index),
+                        icon: const Icon(Icons.document_scanner_outlined),
+                        tooltip: '拍照识别电流',
                       ),
                       IconButton(
                         onPressed: () => _showDeviceSettingsDialog(index),
@@ -1497,6 +1851,151 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
             ),
           );
         },
+      ),
+    );
+  }
+}
+
+class MeterOcrCameraPage extends StatefulWidget {
+  final CameraDescription camera;
+  final String title;
+  const MeterOcrCameraPage({super.key, required this.camera, required this.title});
+
+  @override
+  State<MeterOcrCameraPage> createState() => _MeterOcrCameraPageState();
+}
+
+class _MeterOcrCameraPageState extends State<MeterOcrCameraPage> {
+  CameraController? _controller;
+  bool _isReady = false;
+  FlashMode _flashMode = FlashMode.off;
+
+  @override
+  void initState() {
+    super.initState();
+    _initCamera();
+  }
+
+  Future<void> _initCamera() async {
+    _controller = CameraController(widget.camera, ResolutionPreset.high, enableAudio: false);
+    try {
+      await _controller!.initialize();
+      await _controller!.setFlashMode(_flashMode);
+      if (mounted) setState(() => _isReady = true);
+    } catch (e) {
+      debugPrint('Meter OCR camera init error: $e');
+    }
+  }
+
+  Future<void> _toggleFlash() async {
+    if (_controller == null) return;
+    _flashMode = _flashMode == FlashMode.off ? FlashMode.torch : FlashMode.off;
+    try {
+      await _controller!.setFlashMode(_flashMode);
+      if (mounted) setState(() {});
+    } catch (e) {
+      debugPrint('Toggle flash error: $e');
+    }
+  }
+
+  Future<void> _capture() async {
+    if (_controller == null || !_isReady) return;
+    try {
+      final file = await _controller!.takePicture();
+      if (!mounted) return;
+      Navigator.pop(context, file);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拍照失败: $e')));
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: Text('识别电流 - ${widget.title}'),
+        actions: [
+          IconButton(
+            onPressed: _toggleFlash,
+            icon: Icon(_flashMode == FlashMode.torch ? Icons.flash_on : Icons.flash_off),
+            tooltip: _flashMode == FlashMode.torch ? '闪光灯常开' : '闪光灯关闭',
+          ),
+        ],
+      ),
+      body: _isReady && _controller != null
+          ? LayoutBuilder(
+              builder: (context, constraints) {
+                final w = constraints.maxWidth;
+                final h = constraints.maxHeight;
+                final left = w * 0.22;
+                final top = h * 0.32;
+                final rectW = w * 0.56;
+                final rectH = h * 0.36;
+
+                return Stack(
+                  children: [
+                    Positioned.fill(child: CameraPreview(_controller!)),
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: Container(color: Colors.black38),
+                      ),
+                    ),
+                    Positioned(
+                      left: left,
+                      top: top,
+                      width: rectW,
+                      height: rectH,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.lightGreenAccent, width: 2),
+                          borderRadius: BorderRadius.circular(10),
+                          color: Colors.transparent,
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      left: left + 8,
+                      top: top + 8,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(8)),
+                        child: const Text(
+                          '识别区域',
+                          style: TextStyle(color: Colors.white, fontSize: 12),
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      bottom: 120,
+                      left: 20,
+                      right: 20,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(12)),
+                        child: const Text(
+                          '将“电流 A/B/C + 单位 A”放入绿色框内，尽量只拍屏幕数据区',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            )
+          : const Center(child: CircularProgressIndicator()),
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+      floatingActionButton: FloatingActionButton.large(
+        onPressed: _isReady ? _capture : null,
+        child: const Icon(Icons.camera_alt),
       ),
     );
   }
