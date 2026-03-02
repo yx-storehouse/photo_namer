@@ -180,6 +180,9 @@ class _HomePageState extends State<HomePage> {
   static const String _prefStrategyKey = 'conflict_strategy';
   static const String _prefSortByKey = 'sort_by';
   static const String _prefMeterRoomsKey = 'meter_rooms';
+  static const String _prefShowHomeAddButtonKey = 'show_home_add_button';
+  static const String _prefShowMeterRoomAddButtonKey = 'show_meter_room_add_button';
+  static const String _prefShowMeterDeviceAddButtonKey = 'show_meter_device_add_button';
 
   List<InspectionItem> _items = [];
   String _saveFolderName = 'PhotoNamer';
@@ -187,6 +190,9 @@ class _HomePageState extends State<HomePage> {
   ConflictStrategy _strategy = ConflictStrategy.increment;
   String _sortBy = 'serial';
   List<MeterRoom> _meterRooms = [];
+  bool _showHomeAddButton = true;
+  bool _showMeterRoomAddButton = true;
+  bool _showMeterDeviceAddButton = true;
 
   final TextEditingController _searchCtrl = TextEditingController();
   String _floorFilter = '全部';
@@ -218,6 +224,9 @@ class _HomePageState extends State<HomePage> {
     final strategyStr = prefs.getString(_prefStrategyKey) ?? 'increment';
     _strategy = strategyStr == 'overwrite' ? ConflictStrategy.overwrite : ConflictStrategy.increment;
     _sortBy = prefs.getString(_prefSortByKey) ?? 'serial';
+    _showHomeAddButton = prefs.getBool(_prefShowHomeAddButtonKey) ?? true;
+    _showMeterRoomAddButton = prefs.getBool(_prefShowMeterRoomAddButtonKey) ?? true;
+    _showMeterDeviceAddButton = prefs.getBool(_prefShowMeterDeviceAddButtonKey) ?? true;
 
     final String? itemsJson = prefs.getString(_prefItemsKey);
     if (itemsJson != null) {
@@ -336,6 +345,9 @@ class _HomePageState extends State<HomePage> {
     await prefs.setString(_prefStrategyKey, _strategy.name);
     await prefs.setString(_prefSortByKey, _sortBy);
     await prefs.setString(_prefMeterRoomsKey, jsonEncode(_meterRooms.map((e) => e.toJson()).toList()));
+    await prefs.setBool(_prefShowHomeAddButtonKey, _showHomeAddButton);
+    await prefs.setBool(_prefShowMeterRoomAddButtonKey, _showMeterRoomAddButton);
+    await prefs.setBool(_prefShowMeterDeviceAddButtonKey, _showMeterDeviceAddButton);
   }
 
   Future<void> _clearAllCapturedPhotos() async {
@@ -425,6 +437,8 @@ class _HomePageState extends State<HomePage> {
             await _saveData();
           },
           onCreateRoomFromInspection: _buildMeterRoomFromInspection,
+          showMeterRoomAddButton: _showMeterRoomAddButton,
+          showMeterDeviceAddButton: _showMeterDeviceAddButton,
         ),
       ),
     );
@@ -861,6 +875,41 @@ class _HomePageState extends State<HomePage> {
                 ],
                 onChanged: (v) { setModalState(() => _sortBy = v!); _saveData(); _recalculateDisplayData(); },
               ),
+              const SizedBox(height: 14),
+              const Text('添加按钮显示方式', style: TextStyle(fontWeight: FontWeight.bold)),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('首页添加按钮直接显示'),
+                subtitle: const Text('关闭后合并到右上角三点菜单'),
+                value: _showHomeAddButton,
+                onChanged: (v) async {
+                  setState(() => _showHomeAddButton = v);
+                  setModalState(() {});
+                  await _saveData();
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('抄表房间添加按钮直接显示'),
+                subtitle: const Text('关闭后合并到抄表页三点菜单'),
+                value: _showMeterRoomAddButton,
+                onChanged: (v) async {
+                  setState(() => _showMeterRoomAddButton = v);
+                  setModalState(() {});
+                  await _saveData();
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('抄表设备添加按钮直接显示'),
+                subtitle: const Text('关闭后合并到抄表详情三点菜单'),
+                value: _showMeterDeviceAddButton,
+                onChanged: (v) async {
+                  setState(() => _showMeterDeviceAddButton = v);
+                  setModalState(() {});
+                  await _saveData();
+                },
+              ),
             ],
           ),
         ),
@@ -902,6 +951,15 @@ class _HomePageState extends State<HomePage> {
             Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(99))),
             const SizedBox(height: 12),
             const ListTile(title: Text('更多操作', style: TextStyle(fontWeight: FontWeight.bold))),
+            if (!_showHomeAddButton)
+              ListTile(
+                leading: const Icon(Icons.add_circle_outline),
+                title: const Text('新增预设'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showAddEditDialog();
+                },
+              ),
             ListTile(
               leading: const Icon(Icons.folder_zip_outlined),
               title: const Text('打包导出照片 (ZIP)'),
@@ -990,7 +1048,9 @@ class _HomePageState extends State<HomePage> {
           IconButton(onPressed: _showHomeActionsSheet, icon: const Icon(Icons.more_horiz), tooltip: '更多操作'),
         ],
       ),
-      floatingActionButton: FloatingActionButton(onPressed: () => _showAddEditDialog(), child: const Icon(Icons.add)),
+      floatingActionButton: _showHomeAddButton
+          ? FloatingActionButton(onPressed: () => _showAddEditDialog(), child: const Icon(Icons.add))
+          : null,
       body: Stack(
         children: [
           SafeArea(
@@ -1106,6 +1166,8 @@ class MeterRoomsPage extends StatefulWidget {
   final List<CameraDescription> cameras;
   final Future<void> Function(List<MeterRoom>) onSave;
   final MeterRoom Function(InspectionItem item) onCreateRoomFromInspection;
+  final bool showMeterRoomAddButton;
+  final bool showMeterDeviceAddButton;
 
   const MeterRoomsPage({
     super.key,
@@ -1114,6 +1176,8 @@ class MeterRoomsPage extends StatefulWidget {
     required this.cameras,
     required this.onSave,
     required this.onCreateRoomFromInspection,
+    required this.showMeterRoomAddButton,
+    required this.showMeterDeviceAddButton,
   });
 
   @override
@@ -1351,6 +1415,15 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
                 await _exportMeterData();
               },
             ),
+            if (!widget.showMeterRoomAddButton)
+              ListTile(
+                leading: const Icon(Icons.add_home_outlined),
+                title: const Text('添加房间'),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _pickRoomAndAdd();
+                },
+              ),
             ListTile(
               leading: const Icon(Icons.cleaning_services_outlined, color: Colors.red),
               title: const Text('一键清空抄表数据', style: TextStyle(color: Colors.red)),
@@ -1441,11 +1514,13 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
           IconButton(onPressed: _showMeterActionsSheet, icon: const Icon(Icons.more_horiz), tooltip: '抄表更多操作'),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _pickRoomAndAdd,
-        icon: const Icon(Icons.add),
-        label: const Text('添加房间'),
-      ),
+      floatingActionButton: widget.showMeterRoomAddButton
+          ? FloatingActionButton.extended(
+              onPressed: _pickRoomAndAdd,
+              icon: const Icon(Icons.add),
+              label: const Text('添加房间'),
+            )
+          : null,
       body: _rooms.isEmpty
           ? const Center(child: Text('还没有抄表房间\n点击右下角添加', textAlign: TextAlign.center))
           : GridView.builder(
@@ -1470,6 +1545,7 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
                         MeterDetailPage(
                           room: room,
                           cameras: widget.cameras,
+                          showAddDeviceButton: widget.showMeterDeviceAddButton,
                           onChanged: () async {
                             await widget.onSave(_rooms);
                             if (mounted) setState(() {});
@@ -1506,7 +1582,14 @@ class MeterDetailPage extends StatefulWidget {
   final MeterRoom room;
   final List<CameraDescription> cameras;
   final Future<void> Function() onChanged;
-  const MeterDetailPage({super.key, required this.room, required this.cameras, required this.onChanged});
+  final bool showAddDeviceButton;
+  const MeterDetailPage({
+    super.key,
+    required this.room,
+    required this.cameras,
+    required this.onChanged,
+    required this.showAddDeviceButton,
+  });
 
   @override
   State<MeterDetailPage> createState() => _MeterDetailPageState();
@@ -2205,6 +2288,12 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
             icon: const Icon(Icons.bug_report_outlined),
             tooltip: '查看 OCR 调试结果',
           ),
+          if (!widget.showAddDeviceButton)
+            IconButton(
+              onPressed: _addDevice,
+              icon: const Icon(Icons.playlist_add_outlined),
+              tooltip: '新增UPS/进线柜',
+            ),
           IconButton(onPressed: _editRoomName, icon: const Icon(Icons.edit)),
         ],
       ),
@@ -2223,18 +2312,20 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
               child: const Icon(Icons.arrow_downward_rounded, size: 20),
             ),
           ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: 44,
-            height: 44,
-            child: FloatingActionButton(
-              heroTag: 'fab_add_device',
-              mini: true,
-              onPressed: _addDevice,
-              tooltip: '新增UPS/进线柜',
-              child: const Icon(Icons.add, size: 20),
+          if (widget.showAddDeviceButton) ...[
+            const SizedBox(height: 8),
+            SizedBox(
+              width: 44,
+              height: 44,
+              child: FloatingActionButton(
+                heroTag: 'fab_add_device',
+                mini: true,
+                onPressed: _addDevice,
+                tooltip: '新增UPS/进线柜',
+                child: const Icon(Icons.add, size: 20),
+              ),
             ),
-          ),
+          ],
         ],
       ),
       body: ListView.builder(
