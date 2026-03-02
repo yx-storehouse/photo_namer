@@ -14,6 +14,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:archive/archive_io.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:http/http.dart' as http;
 
 // -------------------- Models --------------------
 class InspectionItem {
@@ -57,6 +58,25 @@ class InspectionItem {
 }
 
 enum ConflictStrategy { overwrite, increment }
+enum OcrMode { local, online }
+
+Route<T> buildAppRoute<T>(Widget page) {
+  return PageRouteBuilder<T>(
+    transitionDuration: const Duration(milliseconds: 260),
+    reverseTransitionDuration: const Duration(milliseconds: 220),
+    pageBuilder: (context, animation, secondaryAnimation) => page,
+    transitionsBuilder: (context, animation, secondaryAnimation, child) {
+      final curved = CurvedAnimation(parent: animation, curve: Curves.easeOutCubic, reverseCurve: Curves.easeInCubic);
+      return FadeTransition(
+        opacity: curved,
+        child: SlideTransition(
+          position: Tween<Offset>(begin: const Offset(0.06, 0), end: Offset.zero).animate(curved),
+          child: child,
+        ),
+      );
+    },
+  );
+}
 
 class MeterDevice {
   String name;
@@ -318,6 +338,45 @@ class _HomePageState extends State<HomePage> {
     await prefs.setString(_prefMeterRoomsKey, jsonEncode(_meterRooms.map((e) => e.toJson()).toList()));
   }
 
+  Future<void> _clearAllCapturedPhotos() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('一键删除全部已拍照片'),
+        content: const Text('将清空所有项目的已拍照片，并尝试删除对应图片文件。此操作不可恢复，确定继续吗？'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('删除全部')),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    int removedFileCount = 0;
+    for (final item in _items) {
+      for (final p in item.photoPaths) {
+        final file = File(p);
+        if (await file.exists()) {
+          try {
+            await file.delete();
+            removedFileCount++;
+          } catch (_) {}
+        }
+      }
+      item.photoPaths = [];
+      item.isCompleted = false;
+    }
+
+    await _saveData();
+    _recalculateDisplayData();
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已清空全部拍照记录，删除文件 $removedFileCount 张')),
+    );
+  }
+
   String _defaultMeterRoomNameTemplate(InspectionItem it) {
     // 房间级模板：默认使用“位置 + 类型 + 编号”作为抄表房间名
     final parts = <String>[];
@@ -356,8 +415,8 @@ class _HomePageState extends State<HomePage> {
   Future<void> _openMeterFeature() async {
     final result = await Navigator.push<bool>(
       context,
-      MaterialPageRoute(
-        builder: (_) => MeterRoomsPage(
+      buildAppRoute(
+        MeterRoomsPage(
           allInspectionItems: _items,
           meterRooms: _meterRooms,
           cameras: widget.cameras,
@@ -395,7 +454,7 @@ class _HomePageState extends State<HomePage> {
       InspectionItem(id: 16, name: '1-2高压配电室PG02', type: '高压配电室', location: '1-2', serial: 'PG02'),
       InspectionItem(id: 17, name: '3-1低压配电室PD05', type: '低压配电室', location: '3-1', serial: 'PD05'),
       InspectionItem(id: 18, name: '3-1电池室PC05', type: '电池室', location: '3-1', serial: 'PC05'),
-      InspectionItem(id: 19, name: '3-1网络传输机房Z02', type: '网络传输机房', location: '3-1', serial: 'Z02'),
+      InspectionItem(id: 19, name: '3-1网络传输机房Z02', type: '网络传输机房', location: '3-1', serial: 'Z02('),
       InspectionItem(id: 20, name: '3-2低压配电室PD06', type: '低压配电室', location: '3-2', serial: 'PD06'),
       InspectionItem(id: 21, name: '3-2电池室PC06', type: '电池室', location: '3-2', serial: 'PC06'),
       InspectionItem(id: 22, name: '3-3机房ID07', type: '机房', location: '3-3', serial: 'ID07'),
@@ -409,11 +468,10 @@ class _HomePageState extends State<HomePage> {
       InspectionItem(id: 30, name: '4-1空调间PK27', type: '空调间', location: '4-1', serial: 'PK27'),
       InspectionItem(id: 31, name: '4-1低压配电室PD07', type: '低压配电室', location: '4-1', serial: 'PD07'),
       InspectionItem(id: 32, name: '4-1电池室PC07', type: '电池室', location: '4-1', serial: 'PC07'),
-      InspectionItem(id: 33, name: '4-1网络传输机房Z03', type: '网络传输机房', location: '4-1', serial: 'Z03'),
+      InspectionItem(id: 33, name: '4-1网络传输机房Z03', type: '网络传输机房', location: '4-1', serial: 'Z03('),
       InspectionItem(id: 34, name: '4-1机房ID09', type: '机房', location: '4-1', serial: 'ID09'),
       InspectionItem(id: 35, name: '4-2低压配电室PD08', type: '低压配电室', location: '4-2', serial: 'PD08'),
       InspectionItem(id: 36, name: '4-2电池室PC08', type: '电池室', location: '4-2', serial: 'PC08'),
-      InspectionItem(id: 37, name: '4-2空调间PK28', type: '空调间', location: '4-2', serial: 'PK28'),
       InspectionItem(id: 38, name: '4-5空调间PK31', type: '空调间', location: '4-5', serial: 'PK31'),
       InspectionItem(id: 39, name: '4-6空调间PK32', type: '空调间', location: '4-6', serial: 'PK32'),
       InspectionItem(id: 40, name: '4-7空调间PK33', type: '空调间', location: '4-7', serial: 'PK33'),
@@ -434,9 +492,9 @@ class _HomePageState extends State<HomePage> {
       InspectionItem(id: 55, name: '5-6空调间PK41', type: '空调间', location: '5-6', serial: 'PK41'),
       InspectionItem(id: 56, name: '5-7空调间PK42', type: '空调间', location: '5-7', serial: 'PK42'),
       InspectionItem(id: 57, name: '5-8空调间PK43', type: '空调间', location: '5-8', serial: 'PK43'),
-      InspectionItem(id: 58, name: '7-1冷却塔配电室', type: '冷却塔配电室', location: '7-1', serial: '冷却塔配电室'),
-      InspectionItem(id: 59, name: '消防水箱间', type: '消防水箱间', location: '-', serial: '消防水箱间'),
       InspectionItem(id: 60, name: '柴油机PY01', type: '柴油机', location: '-', serial: 'PY01'),
+      InspectionItem(id: 61, name: '4-9空调间PK35', type: '空调间', location: '4-9', serial: 'PK35'),
+      InspectionItem(id: 62, name: '3-9空调间PK26', type: '空调间', location: '3-9', serial: 'PK26'),
     ];
   }
 
@@ -634,16 +692,12 @@ class _HomePageState extends State<HomePage> {
 
     final List<XFile>? photos = await Navigator.push<List<XFile>?>(
       context,
-      PageRouteBuilder(
-        transitionDuration: const Duration(milliseconds: 300),
-        pageBuilder: (context, animation, secondaryAnimation) => CameraPage(
+      buildAppRoute(
+        CameraPage(
           camera: widget.cameras.first,
           title: item.name,
           captureCount: count,
         ),
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          return FadeTransition(opacity: animation, child: child);
-        },
       ),
     );
 
@@ -814,40 +868,126 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Future<void> _resetProgress() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('重置进度'),
+        content: const Text('确定要恢复所有项为待办吗？'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('确定')),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      for (var it in _items) {
+        it.isCompleted = false;
+        it.photoPaths = [];
+      }
+      await _saveData();
+      _recalculateDisplayData();
+    }
+  }
+
+  void _showHomeActionsSheet() {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 10),
+            Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(99))),
+            const SizedBox(height: 12),
+            const ListTile(title: Text('更多操作', style: TextStyle(fontWeight: FontWeight.bold))),
+            ListTile(
+              leading: const Icon(Icons.folder_zip_outlined),
+              title: const Text('打包导出照片 (ZIP)'),
+              onTap: () async {
+                Navigator.pop(context);
+                await _exportZip();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_sweep_outlined, color: Colors.red),
+              title: const Text('一键删除全部已拍照片', style: TextStyle(color: Colors.red)),
+              onTap: () async {
+                Navigator.pop(context);
+                await _clearAllCapturedPhotos();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.settings_outlined),
+              title: const Text('设置'),
+              onTap: () {
+                Navigator.pop(context);
+                _showConfigSheet(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.refresh),
+              title: const Text('重置进度'),
+              onTap: () async {
+                Navigator.pop(context);
+                await _resetProgress();
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHomeDrawer() {
+    return Drawer(
+      child: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Text('功能导航', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+            ),
+            ListTile(
+              leading: const Icon(Icons.fact_check_outlined),
+              title: const Text('动力抄表'),
+              subtitle: const Text('进入抄表房间与数据管理'),
+              onTap: () async {
+                Navigator.pop(context);
+                await _openMeterFeature();
+              },
+            ),
+            const Divider(height: 1),
+            const ListTile(
+              leading: Icon(Icons.dashboard_customize_outlined, color: Colors.black45),
+              title: Text('更多栏目敬请期待', style: TextStyle(color: Colors.black54)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      drawer: _buildHomeDrawer(),
       appBar: AppBar(
+        leading: Builder(
+          builder: (context) => IconButton(
+            icon: const Icon(Icons.menu),
+            tooltip: '打开导航菜单',
+            onPressed: () => Scaffold.of(context).openDrawer(),
+          ),
+        ),
         title: const Text('PhotoNamer', style: TextStyle(fontWeight: FontWeight.w700)),
         centerTitle: false,
         backgroundColor: const Color(0xFFF6F8FC),
         actions: [
-          IconButton(onPressed: _openMeterFeature, icon: const Icon(Icons.fact_check_outlined), tooltip: '动力抄表'),
-          IconButton(onPressed: () => _showConfigSheet(context), icon: const Icon(Icons.tune)),
-          IconButton(
-            onPressed: () async {
-              final confirm = await showDialog<bool>(
-                context: context,
-                builder: (context) => AlertDialog(
-                  title: const Text('重置进度'),
-                  content: const Text('确定要恢复所有项为待办吗？'),
-                  actions: [
-                    TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
-                    TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('确定')),
-                  ],
-                ),
-              );
-              if (confirm == true) {
-                for (var it in _items) {
-                  it.isCompleted = false;
-                  it.photoPaths = [];
-                }
-                await _saveData();
-                _recalculateDisplayData();
-              }
-            },
-            icon: const Icon(Icons.refresh),
-          ),
+          IconButton(onPressed: _showHomeActionsSheet, icon: const Icon(Icons.more_horiz), tooltip: '更多操作'),
         ],
       ),
       floatingActionButton: FloatingActionButton(onPressed: () => _showAddEditDialog(), child: const Icon(Icons.add)),
@@ -1069,6 +1209,76 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
     }
   }
 
+  Future<void> _importMeterData() async {
+    try {
+      final picked = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: ['json']);
+      if (picked == null || picked.files.single.path == null) return;
+
+      final filePath = picked.files.single.path!;
+      final text = await File(filePath).readAsString();
+      final decoded = jsonDecode(text);
+      final List<dynamic> rooms = (decoded is Map<String, dynamic>) ? (decoded['rooms'] as List<dynamic>? ?? []) : [];
+
+      if (rooms.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('导入文件无有效抄表数据')));
+        return;
+      }
+
+      final imported = rooms.map((e) {
+        final m = e as Map<String, dynamic>;
+        final List<dynamic> ds = m['devices'] as List<dynamic>? ?? [];
+
+        return MeterRoom(
+          roomId: m['roomId'] is int ? m['roomId'] : DateTime.now().millisecondsSinceEpoch,
+          roomName: (m['roomName'] ?? '').toString(),
+          roomType: (m['roomType'] ?? '').toString(),
+          location: (m['location'] ?? '').toString(),
+          devices: ds.map((d) {
+            final dm = d as Map<String, dynamic>;
+            final rawValues = dm['values'];
+            List<String> values = List<String>.from(MeterDevice.defaultMeterValues());
+            if (rawValues is List) {
+              final parsed = rawValues.map((v) => (v ?? '').toString()).toList();
+              for (int i = 0; i < values.length && i < parsed.length; i++) {
+                values[i] = parsed[i];
+              }
+            }
+
+            return MeterDevice(
+              name: (dm['name'] ?? '未命名设备').toString(),
+              values: values,
+            );
+          }).toList(),
+        );
+      }).toList();
+
+      if (!mounted) return;
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('导入抄表数据'),
+          content: Text('即将导入 ${imported.length} 个房间的数据，并覆盖当前动力抄表页数据，是否继续？'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+            TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('导入覆盖')),
+          ],
+        ),
+      );
+
+      if (confirm != true) return;
+
+      setState(() => _rooms = imported);
+      await widget.onSave(_rooms);
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已导入 ${_rooms.length} 个房间的抄表数据')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导入抄表数据失败: $e')));
+    }
+  }
+
   Future<void> _clearMeterValues() async {
     final confirm = await showDialog<bool>(
       context: context,
@@ -1095,6 +1305,65 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
 
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已清空抄表数据')));
+  }
+
+  void _showMeterActionsSheet() {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 10),
+            Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(99))),
+            const SizedBox(height: 12),
+            const ListTile(title: Text('抄表操作', style: TextStyle(fontWeight: FontWeight.bold))),
+            ListTile(
+              leading: const Icon(Icons.file_download_outlined),
+              title: const Text('导入配置'),
+              onTap: () async {
+                Navigator.pop(context);
+                await _importRoomConfig();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.file_upload_outlined),
+              title: const Text('导出配置'),
+              onTap: () async {
+                Navigator.pop(context);
+                await _exportRoomConfig();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.data_array_outlined),
+              title: const Text('导入抄表数据'),
+              onTap: () async {
+                Navigator.pop(context);
+                await _importMeterData();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.data_object_outlined),
+              title: const Text('导出抄表数据'),
+              onTap: () async {
+                Navigator.pop(context);
+                await _exportMeterData();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.cleaning_services_outlined, color: Colors.red),
+              title: const Text('一键清空抄表数据', style: TextStyle(color: Colors.red)),
+              onTap: () async {
+                Navigator.pop(context);
+                await _clearMeterValues();
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -1169,10 +1438,7 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
       appBar: AppBar(
         title: const Text('动力抄表'),
         actions: [
-          IconButton(onPressed: _importRoomConfig, icon: const Icon(Icons.file_download_outlined), tooltip: '导入配置'),
-          IconButton(onPressed: _exportRoomConfig, icon: const Icon(Icons.file_upload_outlined), tooltip: '导出配置'),
-          IconButton(onPressed: _exportMeterData, icon: const Icon(Icons.data_object_outlined), tooltip: '导出抄表数据'),
-          IconButton(onPressed: _clearMeterValues, icon: const Icon(Icons.cleaning_services_outlined), tooltip: '一键清空抄表数据'),
+          IconButton(onPressed: _showMeterActionsSheet, icon: const Icon(Icons.more_horiz), tooltip: '抄表更多操作'),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
@@ -1200,8 +1466,8 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
                   onTap: () async {
                     await Navigator.push(
                       context,
-                      MaterialPageRoute(
-                        builder: (_) => MeterDetailPage(
+                      buildAppRoute(
+                        MeterDetailPage(
                           room: room,
                           cameras: widget.cameras,
                           onChanged: () async {
@@ -1251,12 +1517,23 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
   final Map<String, TextEditingController> _valueControllers = {};
   int _nextDeviceIndexForCurrent = 0;
   int _nextCurrentFieldIndex = 3;
+  int? _activeCurrentDeviceIndex;
+  int? _activeCurrentFieldIndex;
 
   String _lastOcrRawText = '';
   List<String> _lastOcrNumbers = [];
   List<String> _lastOcrFocusLines = [];
 
   static const Rect _ocrFocusRectNormalized = Rect.fromLTWH(0.22, 0.32, 0.56, 0.36);
+  static const Rect _incomingCabinetRectNormalized = Rect.fromLTWH(0.28, 0.22, 0.44, 0.48);
+
+  static const String _baiduAppId = '7473614';
+  static const String _baiduApiKey = 'GOiAIygVECnMVJWnpQGcBbNs';
+  static const String _baiduSecretKey = 's7nnGZ9mhNv8in2b7eyjm0g3zjrhXUqv';
+
+  OcrMode _ocrMode = OcrMode.local;
+  String? _baiduAccessToken;
+  DateTime? _baiduTokenExpireAt;
 
   FocusNode _focusNodeFor(int deviceIndex, int fieldIndex) {
     final key = '$deviceIndex-$fieldIndex';
@@ -1435,6 +1712,49 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
     return null;
   }
 
+  List<String> _extractIncomingCabinetCurrentCandidates(String text) {
+    final lines = text
+        .split(RegExp(r'\r?\n'))
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+
+    _lastOcrFocusLines = [];
+
+    final skipKeyword = RegExp(r'(打卡|今日水印|时间地点|杭州|中国电信|PD\d+|低压进线柜|A\s*$)', caseSensitive: false);
+
+    // 进线柜数字表：通常是 3 行单值（每行后面可能带 A），优先连续三行提取
+    for (int i = 0; i + 2 < lines.length; i++) {
+      final l1 = lines[i];
+      final l2 = lines[i + 1];
+      final l3 = lines[i + 2];
+      if (skipKeyword.hasMatch(l1) || skipKeyword.hasMatch(l2) || skipKeyword.hasMatch(l3)) continue;
+
+      final n1 = _numbersFromLine(l1);
+      final n2 = _numbersFromLine(l2);
+      final n3 = _numbersFromLine(l3);
+      if (n1.length != 1 || n2.length != 1 || n3.length != 1) continue;
+
+      final triple = [n1.first, n2.first, n3.first];
+      if (triple.every((n) {
+        final v = double.tryParse(n);
+        return v != null && v > 1.2 && v <= 9999;
+      })) {
+        _lastOcrFocusLines = [l1, l2, l3];
+        return triple;
+      }
+    }
+
+    // 保底：从全部数字中取最后 3 个像电流的值
+    final all = _numbersFromLine(text).where((n) {
+      final v = double.tryParse(n);
+      return v != null && v > 1.2 && v <= 9999;
+    }).toList();
+
+    if (all.length <= 3) return all;
+    return all.sublist(all.length - 3);
+  }
+
   List<String> _extractCurrentCandidates(String text) {
     final lines = text
         .split(RegExp(r'\r?\n'))
@@ -1588,36 +1908,17 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
     }
   }
 
-  Future<void> _recognizeCurrentFromCamera(int deviceIndex) async {
-    if (widget.cameras.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('未检测到相机')));
-      return;
-    }
+  bool _isIncomingCabinetDevice(MeterDevice device) {
+    final name = device.name.trim().toLowerCase();
+    return name.contains('进线柜') || name.contains('incoming') || name.contains('feeder');
+  }
 
-    final cameraStatus = await Permission.camera.request();
-    if (!cameraStatus.isGranted) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先授予相机权限')));
-      return;
-    }
-
-    final XFile? photo = await Navigator.push<XFile?>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => MeterOcrCameraPage(camera: widget.cameras.first, title: widget.room.devices[deviceIndex].name),
-      ),
-    );
-
-    if (photo == null) return;
-
+  Future<String> _recognizeTextWithLocalOcr(String imagePath, String originalPath) async {
     final recognizerCn = TextRecognizer(script: TextRecognitionScript.chinese);
     final recognizerLatin = TextRecognizer(script: TextRecognitionScript.latin);
     try {
-      final croppedPath = await _buildCroppedImageFilePath(photo.path, _ocrFocusRectNormalized);
-      final inputImage = InputImage.fromFilePath(croppedPath ?? photo.path);
-      final fullImage = InputImage.fromFilePath(photo.path);
-
+      final inputImage = InputImage.fromFilePath(imagePath);
+      final fullImage = InputImage.fromFilePath(originalPath);
       String text = '';
 
       try {
@@ -1641,8 +1942,121 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
         text = retryLatin.text;
       }
 
+      return text.trim();
+    } finally {
+      recognizerCn.close();
+      recognizerLatin.close();
+    }
+  }
+
+  Future<String?> _ensureBaiduAccessToken() async {
+    final now = DateTime.now();
+    if (_baiduAccessToken != null &&
+        _baiduTokenExpireAt != null &&
+        now.isBefore(_baiduTokenExpireAt!)) {
+      return _baiduAccessToken;
+    }
+
+    final uri = Uri.parse('https://aip.baidubce.com/oauth/2.0/token');
+    final response = await http.post(uri, body: {
+      'grant_type': 'client_credentials',
+      'client_id': _baiduApiKey,
+      'client_secret': _baiduSecretKey,
+    });
+
+    if (response.statusCode != 200) {
+      throw Exception('获取百度 access_token 失败(${response.statusCode})');
+    }
+
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final token = (data['access_token'] ?? '').toString();
+    if (token.isEmpty) {
+      throw Exception('百度返回 access_token 为空');
+    }
+
+    final expiresIn = (data['expires_in'] as num?)?.toInt() ?? 0;
+    _baiduAccessToken = token;
+    _baiduTokenExpireAt = now.add(Duration(seconds: expiresIn > 120 ? expiresIn - 120 : expiresIn));
+    return token;
+  }
+
+  Future<String> _recognizeTextWithBaiduOcr(String imagePath) async {
+    final token = await _ensureBaiduAccessToken();
+    if (token == null || token.isEmpty) {
+      throw Exception('百度 access_token 不可用');
+    }
+
+    final bytes = await File(imagePath).readAsBytes();
+    final imageBase64 = base64Encode(bytes);
+
+    final uri = Uri.parse('https://aip.baidubce.com/rest/2.0/ocr/v1/general_basic?access_token=$token');
+    final response = await http.post(
+      uri,
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: {
+        'image': imageBase64,
+        'language_type': 'CHN_ENG',
+      },
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception('百度 OCR 请求失败(${response.statusCode})');
+    }
+
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    if (data['error_code'] != null) {
+      throw Exception('百度 OCR 错误: ${data['error_msg'] ?? data['error_code']}');
+    }
+
+    final wordsResult = data['words_result'];
+    if (wordsResult is! List) return '';
+
+    final lines = wordsResult
+        .whereType<Map>()
+        .map((e) => (e['words'] ?? '').toString().trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    return lines.join('\n');
+  }
+
+  Future<void> _recognizeCurrentFromCamera(int deviceIndex) async {
+    if (widget.cameras.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('未检测到相机')));
+      return;
+    }
+
+    final cameraStatus = await Permission.camera.request();
+    if (!cameraStatus.isGranted) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请先授予相机权限')));
+      return;
+    }
+
+    final XFile? photo = await Navigator.push<XFile?>(
+      context,
+      buildAppRoute(
+        MeterOcrCameraPage(camera: widget.cameras.first, title: widget.room.devices[deviceIndex].name),
+      ),
+    );
+
+    if (photo == null) return;
+
+    try {
+      final isIncoming = _isIncomingCabinetDevice(widget.room.devices[deviceIndex]);
+      final focusRect = isIncoming ? _incomingCabinetRectNormalized : _ocrFocusRectNormalized;
+
+      final croppedPath = await _buildCroppedImageFilePath(photo.path, focusRect);
+      final targetPath = croppedPath ?? photo.path;
+
+      final text = _ocrMode == OcrMode.online
+          ? await _recognizeTextWithBaiduOcr(targetPath)
+          : await _recognizeTextWithLocalOcr(targetPath, photo.path);
+
       final allNumbers = RegExp(r'[-+]?\d+(?:[\.,]\d+)?').allMatches(text).map((m) => _normalizeOcrNumber(m.group(0)!)).toList();
-      final matches = _extractCurrentCandidates(text);
+      final matches = isIncoming
+          ? _extractIncomingCabinetCurrentCandidates(text)
+          : _extractCurrentCandidates(text);
 
       setState(() {
         _lastOcrRawText = text;
@@ -1665,37 +2079,51 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
 
       await widget.onChanged();
       if (!mounted) return;
+      final modeLabel = _ocrMode == OcrMode.online ? '在线(百度)' : '本地(MLKit)';
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('识别完成，候选:${matches.join('/')}（可点右上角查看完整 OCR）')),
+        SnackBar(content: Text('[$modeLabel] 识别完成，候选:${matches.join('/')}（可点右上角查看完整 OCR）')),
       );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('识别失败: $e')));
-    } finally {
-      recognizerCn.close();
-      recognizerLatin.close();
     }
   }
 
   void _focusNextCurrentGlobal() {
     if (widget.room.devices.isEmpty) return;
 
-    if (_nextDeviceIndexForCurrent >= widget.room.devices.length) {
-      _nextDeviceIndexForCurrent = 0;
+    int deviceIndex = _nextDeviceIndexForCurrent;
+    int fieldIndex = _nextCurrentFieldIndex;
+
+    if (_activeCurrentDeviceIndex != null && _activeCurrentFieldIndex != null) {
+      deviceIndex = _activeCurrentDeviceIndex!;
+      fieldIndex = _activeCurrentFieldIndex!;
+      if (fieldIndex == 5) {
+        fieldIndex = 3;
+        deviceIndex = (deviceIndex + 1) % widget.room.devices.length;
+      } else {
+        fieldIndex += 1;
+      }
     }
 
-    final deviceIndex = _nextDeviceIndexForCurrent;
-    final fieldIndex = _nextCurrentFieldIndex;
+    if (deviceIndex >= widget.room.devices.length) {
+      deviceIndex = 0;
+      fieldIndex = 3;
+    }
 
     final controller = _controllerFor(deviceIndex, fieldIndex, widget.room.devices[deviceIndex].values[fieldIndex]);
     controller.selection = TextSelection(baseOffset: 0, extentOffset: controller.text.length);
     FocusScope.of(context).requestFocus(_focusNodeFor(deviceIndex, fieldIndex));
 
-    if (_nextCurrentFieldIndex == 5) {
+    _activeCurrentDeviceIndex = deviceIndex;
+    _activeCurrentFieldIndex = fieldIndex;
+
+    if (fieldIndex == 5) {
       _nextCurrentFieldIndex = 3;
-      _nextDeviceIndexForCurrent = (_nextDeviceIndexForCurrent + 1) % widget.room.devices.length;
+      _nextDeviceIndexForCurrent = (deviceIndex + 1) % widget.room.devices.length;
     } else {
-      _nextCurrentFieldIndex += 1;
+      _nextCurrentFieldIndex = fieldIndex + 1;
+      _nextDeviceIndexForCurrent = deviceIndex;
     }
   }
 
@@ -1726,6 +2154,12 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
             border: OutlineInputBorder(),
             contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 10),
           ),
+          onTap: () {
+            if (fieldIndex >= 3 && fieldIndex <= 5) {
+              _activeCurrentDeviceIndex = deviceIndex;
+              _activeCurrentFieldIndex = fieldIndex;
+            }
+          },
           onChanged: onChanged,
         ),
       ],
@@ -1738,6 +2172,34 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
       appBar: AppBar(
         title: Text('抄表 - ${widget.room.roomName}'),
         actions: [
+          PopupMenuButton<OcrMode>(
+            tooltip: 'OCR 模式切换',
+            onSelected: (mode) {
+              setState(() => _ocrMode = mode);
+              final label = mode == OcrMode.online ? '在线(百度 OCR)' : '本地(MLKit)';
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('已切换到$label')));
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: OcrMode.local, child: Text('本地模式 (MLKit)')),
+              PopupMenuItem(value: OcrMode.online, child: Text('在线模式 (百度 OCR)')),
+            ],
+            child: Container(
+              margin: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(color: Colors.black12),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.cloud_sync_outlined, size: 18),
+                  const SizedBox(width: 6),
+                  Text(_ocrMode == OcrMode.online ? '在线' : '本地'),
+                ],
+              ),
+            ),
+          ),
           IconButton(
             onPressed: _showOcrDebugDialog,
             icon: const Icon(Icons.bug_report_outlined),
@@ -1750,16 +2212,28 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
-          FloatingActionButton.extended(
-            onPressed: _focusNextCurrentGlobal,
-            icon: const Icon(Icons.arrow_downward_rounded),
-            label: const Text('下一个电流输入框'),
+          SizedBox(
+            width: 44,
+            height: 44,
+            child: FloatingActionButton(
+              heroTag: 'fab_next_current',
+              mini: true,
+              onPressed: _focusNextCurrentGlobal,
+              tooltip: '下一个电流输入框',
+              child: const Icon(Icons.arrow_downward_rounded, size: 20),
+            ),
           ),
-          const SizedBox(height: 10),
-          FloatingActionButton.extended(
-            onPressed: _addDevice,
-            icon: const Icon(Icons.add),
-            label: const Text('新增UPS/进线柜'),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: 44,
+            height: 44,
+            child: FloatingActionButton(
+              heroTag: 'fab_add_device',
+              mini: true,
+              onPressed: _addDevice,
+              tooltip: '新增UPS/进线柜',
+              child: const Icon(Icons.add, size: 20),
+            ),
           ),
         ],
       ),
@@ -2007,7 +2481,26 @@ class _FloorChip extends StatelessWidget {
   final VoidCallback onTap;
   const _FloorChip({required this.label, required this.selected, required this.onTap});
   @override
-  Widget build(BuildContext context) => Padding(padding: const EdgeInsets.only(right: 10), child: InkWell(onTap: onTap, child: Container(padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10), decoration: BoxDecoration(color: selected ? Theme.of(context).colorScheme.primary : Colors.white, borderRadius: BorderRadius.circular(16)), child: Text(label, style: TextStyle(color: selected ? Colors.white : Colors.black54, fontWeight: FontWeight.bold)))));
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(right: 10),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+            decoration: BoxDecoration(
+              color: selected ? Theme.of(context).colorScheme.primary : Colors.white,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Text(
+              label,
+              style: TextStyle(color: selected ? Colors.white : Colors.black54, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ),
+      );
 }
 
 class _TabButton extends StatelessWidget {
@@ -2023,11 +2516,91 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) => Row(children: [Container(width: 4, height: 18, decoration: BoxDecoration(color: Theme.of(context).colorScheme.primary, borderRadius: BorderRadius.circular(99))), const SizedBox(width: 10), Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))]);
 }
 
-class _RoomCard extends StatelessWidget {
-  final String serial; final String location; final bool isCompleted; final VoidCallback onTap; final VoidCallback onLongPress;
-  const _RoomCard({super.key, required this.serial, required this.location, required this.isCompleted, required this.onTap, required this.onLongPress});
+class _RoomCard extends StatefulWidget {
+  final String serial;
+  final String location;
+  final bool isCompleted;
+  final VoidCallback onTap;
+  final VoidCallback onLongPress;
+
+  const _RoomCard({
+    super.key,
+    required this.serial,
+    required this.location,
+    required this.isCompleted,
+    required this.onTap,
+    required this.onLongPress,
+  });
+
   @override
-  Widget build(BuildContext context) => Material(color: Colors.white, borderRadius: BorderRadius.circular(18), elevation: 1, child: InkWell(borderRadius: BorderRadius.circular(18), onTap: onTap, onLongPress: onLongPress, child: Padding(padding: const EdgeInsets.all(10), child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Text(serial, textAlign: TextAlign.center, maxLines: 1, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: isCompleted ? Colors.green : Theme.of(context).colorScheme.primary)), const SizedBox(height: 4), Text(location, textAlign: TextAlign.center, maxLines: 1, style: const TextStyle(fontSize: 11, color: Colors.black38)), if (isCompleted) const Padding(padding: EdgeInsets.only(top: 2), child: Icon(Icons.check_circle, color: Colors.green, size: 14))]))));
+  State<_RoomCard> createState() => _RoomCardState();
+}
+
+class _RoomCardState extends State<_RoomCard> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedScale(
+      duration: const Duration(milliseconds: 110),
+      scale: _pressed ? 0.97 : 1,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        curve: Curves.easeOutCubic,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(18),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: _pressed ? 0.06 : 0.1),
+              blurRadius: _pressed ? 6 : 12,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Material(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(18),
+          elevation: 0,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(18),
+            onTap: widget.onTap,
+            onLongPress: widget.onLongPress,
+            onHighlightChanged: (v) => setState(() => _pressed = v),
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(
+                    widget.serial,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w900,
+                      color: widget.isCompleted ? Colors.green : Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    widget.location,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    style: const TextStyle(fontSize: 11, color: Colors.black38),
+                  ),
+                  if (widget.isCompleted)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 2),
+                      child: Icon(Icons.check_circle, color: Colors.green, size: 14),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // -------------------- Camera Page --------------------

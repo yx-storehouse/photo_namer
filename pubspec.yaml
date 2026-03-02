@@ -27,6 +27,7 @@ dependencies:
   android_intent_plus: ^6.0.0
   google_mlkit_text_recognition: ^0.15.1
   image_picker: ^1.2.1
+  http: ^1.2.2
 
 dev_dependencies:
   flutter_test:
