@@ -1,233 +1,18 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
-import 'package:package_info_plus/package_info_plus.dart';
-import 'package:path/path.dart' as path;
-import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:photo_namer/models/cloud_sync_models.dart';
+import 'package:photo_namer/services/app_update_service.dart';
+import 'package:photo_namer/services/cloud_sync_utils.dart';
+import 'package:photo_namer/services/gitee_cloud_service.dart';
 
-typedef CloudBundleBuilder = Future<Map<String, dynamic>> Function();
-typedef CloudBundleApplier =
-    Future<void> Function(
-      Map<String, dynamic> bundle,
-      CloudSyncApplySelection selection,
-    );
 
-class CloudSyncApplySelection {
-  final bool inspectionItems;
-  final bool meterRooms;
-  final bool overloadTemplates;
-  final bool appPreferences;
-  final bool watermarkTemplate;
-
-  const CloudSyncApplySelection({
-    required this.inspectionItems,
-    required this.meterRooms,
-    required this.overloadTemplates,
-    required this.appPreferences,
-    required this.watermarkTemplate,
-  });
-
-  const CloudSyncApplySelection.all()
-    : inspectionItems = true,
-      meterRooms = true,
-      overloadTemplates = true,
-      appPreferences = true,
-      watermarkTemplate = true;
-
-  bool get hasAny =>
-      inspectionItems ||
-      meterRooms ||
-      overloadTemplates ||
-      appPreferences ||
-      watermarkTemplate;
-
-  List<String> get labels => [
-    if (inspectionItems) '拍照房间模板',
-    if (meterRooms) '动力抄表模板',
-    if (overloadTemplates) '动力超标时段',
-    if (appPreferences) '应用参数',
-    if (watermarkTemplate) '水印参数',
-  ];
-
-  CloudSyncApplySelection copyWith({
-    bool? inspectionItems,
-    bool? meterRooms,
-    bool? overloadTemplates,
-    bool? appPreferences,
-    bool? watermarkTemplate,
-  }) {
-    return CloudSyncApplySelection(
-      inspectionItems: inspectionItems ?? this.inspectionItems,
-      meterRooms: meterRooms ?? this.meterRooms,
-      overloadTemplates: overloadTemplates ?? this.overloadTemplates,
-      appPreferences: appPreferences ?? this.appPreferences,
-      watermarkTemplate: watermarkTemplate ?? this.watermarkTemplate,
-    );
-  }
-}
-
-class _LocalAppVersion {
-  final String versionName;
-  final int versionCode;
-
-  const _LocalAppVersion({
-    required this.versionName,
-    required this.versionCode,
-  });
-
-  String get label => versionName;
-}
-
-List<int> _extractComparableVersionParts(String versionName) {
-  return RegExp(r'\d+')
-      .allMatches(versionName)
-      .map((match) => int.tryParse(match.group(0) ?? '') ?? 0)
-      .toList(growable: false);
-}
-
-int _compareVersionNames(String left, String right) {
-  final leftParts = _extractComparableVersionParts(left);
-  final rightParts = _extractComparableVersionParts(right);
-
-  if (leftParts.isEmpty && rightParts.isEmpty) {
-    return left.trim().toLowerCase().compareTo(right.trim().toLowerCase());
-  }
-
-  final maxLength = math.max(leftParts.length, rightParts.length);
-  for (var index = 0; index < maxLength; index++) {
-    final leftValue = index < leftParts.length ? leftParts[index] : 0;
-    final rightValue = index < rightParts.length ? rightParts[index] : 0;
-    final delta = leftValue.compareTo(rightValue);
-    if (delta != 0) {
-      return delta;
-    }
-  }
-
-  return 0;
-}
-
-class _CloudAppUpdateManifest {
-  final String versionName;
-  final int versionCode;
-  final String title;
-  final String downloadUrl;
-  final List<String> changelog;
-  final bool forceUpdate;
-  final String publishedAt;
-  final String publishedBy;
-
-  const _CloudAppUpdateManifest({
-    required this.versionName,
-    required this.versionCode,
-    required this.title,
-    required this.downloadUrl,
-    required this.changelog,
-    required this.forceUpdate,
-    required this.publishedAt,
-    required this.publishedBy,
-  });
-
-  bool get hasDownloadUrl => downloadUrl.trim().isNotEmpty;
-  String get label => versionName;
-
-  bool isNewerThan(_LocalAppVersion? localVersion) {
-    if (localVersion == null) {
-      return false;
-    }
-
-    final versionNameComparison = _compareVersionNames(
-      versionName,
-      localVersion.versionName,
-    );
-    if (versionNameComparison != 0) {
-      return versionNameComparison > 0;
-    }
-
-    if (versionCode > 0 && localVersion.versionCode > 0) {
-      return versionCode > localVersion.versionCode;
-    }
-
-    return false;
-  }
-
-  Map<String, dynamic> toJson() {
-    return <String, dynamic>{
-      'appId': 'photo_namer',
-      'versionName': versionName,
-      'versionCode': versionCode,
-      'title': title,
-      'downloadUrl': downloadUrl,
-      'changelog': changelog,
-      'forceUpdate': forceUpdate,
-      'publishedAt': publishedAt,
-      'publishedBy': publishedBy,
-    };
-  }
-
-  factory _CloudAppUpdateManifest.fromJson(Map<String, dynamic> json) {
-    final versionName = _normalizedText(json['versionName']);
-    final versionCodeRaw = json['versionCode'];
-    final versionCode = versionCodeRaw is num
-        ? versionCodeRaw.toInt()
-        : int.tryParse(versionCodeRaw?.toString() ?? '') ?? 0;
-    final title = _normalizedText(json['title']).isEmpty
-        ? '发现新版本'
-        : _normalizedText(json['title']);
-    return _CloudAppUpdateManifest(
-      versionName: versionName.isEmpty ? '未命名版本' : versionName,
-      versionCode: versionCode,
-      title: title,
-      downloadUrl: _normalizedText(json['downloadUrl']),
-      changelog: _asStringList(json['changelog'])
-          .map((line) => line.trim())
-          .where((line) => line.isNotEmpty)
-          .toList(growable: false),
-      forceUpdate: json['forceUpdate'] == true,
-      publishedAt: _normalizedText(json['publishedAt']),
-      publishedBy: _normalizedText(json['publishedBy']),
-    );
-  }
-}
-
-class _NativeAppUpdateInstaller {
-  static const MethodChannel _channel = MethodChannel('photo_namer/app_update');
-
-  static Future<bool> canRequestPackageInstalls() async {
-    if (!Platform.isAndroid) {
-      return false;
-    }
-    final result = await _channel.invokeMethod<bool>(
-      'canRequestPackageInstalls',
-    );
-    return result ?? false;
-  }
-
-  static Future<void> openManageUnknownAppSources() {
-    return _channel.invokeMethod<void>('openManageUnknownAppSources');
-  }
-
-  static Future<void> installApk(String filePath) {
-    return _channel.invokeMethod<void>('installApk', <String, dynamic>{
-      'filePath': filePath,
-    });
-  }
-}
 
 const String _cloudSyncAdminSessionPrefKey =
     'photo_namer_cloud_sync_admin_logged_in';
 const String _cloudSyncGuestNamePrefKey = 'photo_namer_cloud_sync_guest_name';
 
-const String _guestSubmissionStatusPending = 'pending';
-const String _guestSubmissionStatusApproved = 'approved';
-const String _guestSubmissionStatusRejected = 'rejected';
-bool _hasAutoCheckedAppUpdateThisSession = false;
-bool _isAutoCheckingAppUpdateThisSession = false;
 
 const Map<String, String> _cloudSyncPreferenceLabels = <String, String>{
   'sortBy': '排序方式',
@@ -261,266 +46,6 @@ const Map<String, String> _cloudSyncWatermarkFieldLabels = <String, String>{
   'defaultAdjustments': '水印排版参数',
 };
 
-Future<_LocalAppVersion?> _readInstalledAppVersion() async {
-  try {
-    final packageInfo = await PackageInfo.fromPlatform();
-    final versionName = packageInfo.version.trim().isEmpty
-        ? '0.0.0'
-        : packageInfo.version.trim();
-    final versionCode = int.tryParse(packageInfo.buildNumber.trim()) ?? 0;
-    return _LocalAppVersion(
-      versionName: versionName,
-      versionCode: versionCode,
-    );
-  } catch (_) {
-    return null;
-  }
-}
-
-Future<bool> _showCloudAppUpdateDialog(
-  BuildContext context,
-  _CloudAppUpdateManifest manifest, {
-  _LocalAppVersion? localVersion,
-}) async {
-  final localLabel = localVersion?.label ?? '未知版本';
-  final remoteLabel = manifest.label;
-  final result = await showDialog<bool>(
-    context: context,
-    barrierDismissible: !manifest.forceUpdate,
-    builder: (context) => PopScope(
-      canPop: !manifest.forceUpdate,
-      child: AlertDialog(
-        title: Text(manifest.title),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('当前版本：$localLabel'),
-              const SizedBox(height: 4),
-              Text('云端版本：$remoteLabel'),
-              if (manifest.publishedAt.trim().isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Text('发布时间：${manifest.publishedAt.trim()}'),
-              ],
-              if (manifest.publishedBy.trim().isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Text('发布人：${manifest.publishedBy.trim()}'),
-              ],
-              if (manifest.forceUpdate) ...[
-                const SizedBox(height: 8),
-                const Chip(
-                  avatar: Icon(Icons.priority_high_outlined, size: 18),
-                  label: Text('重要更新，需要立即安装'),
-                ),
-              ],
-              if (manifest.changelog.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                const Text(
-                  '更新内容',
-                  style: TextStyle(fontWeight: FontWeight.w600),
-                ),
-                const SizedBox(height: 8),
-                ...manifest.changelog.map(
-                  (line) => Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Padding(
-                          padding: EdgeInsets.only(top: 6),
-                          child: Icon(Icons.fiber_manual_record, size: 8),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(child: Text(line)),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-        actions: [
-          if (!manifest.forceUpdate)
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('稍后再说'),
-            ),
-          FilledButton.icon(
-            onPressed: manifest.hasDownloadUrl
-                ? () => Navigator.of(context).pop(true)
-                : null,
-            icon: const Icon(Icons.download_outlined),
-            label: Text(manifest.forceUpdate ? '立即更新' : '下载并安装'),
-          ),
-        ],
-      ),
-    ),
-  );
-  return result == true;
-}
-
-Future<void> _performAppUpdateDownloadAndInstall(
-  BuildContext context,
-  _CloudAppUpdateManifest manifest, {
-  void Function(String message, bool isError)? onStatus,
-  void Function(double? progress)? onProgress,
-}) async {
-  if (!Platform.isAndroid) {
-    if (!context.mounted) {
-      return;
-    }
-    onStatus?.call('当前仅支持 Android 应用内下载并安装更新。', true);
-    return;
-  }
-
-  final canInstall = await _NativeAppUpdateInstaller.canRequestPackageInstalls();
-  if (!canInstall) {
-    if (!context.mounted) {
-      return;
-    }
-    final openSettings = await showDialog<bool>(
-      context: context,
-      barrierDismissible: !manifest.forceUpdate,
-      builder: (context) => PopScope(
-        canPop: !manifest.forceUpdate,
-        child: AlertDialog(
-          title: const Text('需要安装权限'),
-          content: const Text('系统还没有允许本应用安装更新包，请先打开“允许安装未知应用”后再回来继续安装。'),
-          actions: [
-            if (!manifest.forceUpdate)
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: const Text('取消'),
-              ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('去设置'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (openSettings == true) {
-      await _NativeAppUpdateInstaller.openManageUnknownAppSources();
-      onStatus?.call('请开启安装权限后，重新点击更新。', false);
-    } else if (manifest.forceUpdate) {
-      onStatus?.call('重要更新尚未完成，请先开启安装权限。', true);
-    }
-    return;
-  }
-
-  http.Client? client;
-  File? apkFile;
-  IOSink? sink;
-  try {
-    onStatus?.call('正在下载更新包...', false);
-    onProgress?.call(null);
-
-    final uri = Uri.parse(manifest.downloadUrl);
-    client = http.Client();
-    final response = await client.send(http.Request('GET', uri));
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('下载更新包失败(${response.statusCode})');
-    }
-
-    final tempDir = await getTemporaryDirectory();
-    final fileName =
-        'photo_namer_${manifest.versionName}_${manifest.versionCode}.apk'
-            .replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
-    apkFile = File(path.join(tempDir.path, fileName));
-    if (await apkFile.exists()) {
-      await apkFile.delete();
-    }
-
-    sink = apkFile.openWrite();
-    final totalBytes = response.contentLength ?? 0;
-    var receivedBytes = 0;
-    await for (final chunk in response.stream) {
-      sink.add(chunk);
-      receivedBytes += chunk.length;
-      if (totalBytes > 0) {
-        onProgress?.call(receivedBytes / totalBytes);
-      }
-    }
-    await sink.flush();
-    await sink.close();
-    sink = null;
-
-    if (!await apkFile.exists()) {
-      throw Exception('更新包保存失败');
-    }
-
-    onStatus?.call('下载完成，正在打开安装器...', false);
-    await _NativeAppUpdateInstaller.installApk(apkFile.path);
-
-    if (!context.mounted) {
-      return;
-    }
-    onStatus?.call('更新包已下载完成，系统安装器已打开。', false);
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('更新包已下载，正在打开安装器')));
-  } catch (error) {
-    if (apkFile != null && await apkFile.exists()) {
-      await apkFile.delete();
-    }
-    if (!context.mounted) {
-      return;
-    }
-    onStatus?.call('下载或安装更新失败: $error', true);
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('下载或安装更新失败: $error')));
-  } finally {
-    await sink?.close();
-    client?.close();
-    onProgress?.call(null);
-  }
-}
-
-Future<void> maybeAutoCheckCloudAppUpdateOnLaunch(BuildContext context) async {
-  if (_hasAutoCheckedAppUpdateThisSession ||
-      _isAutoCheckingAppUpdateThisSession) {
-    return;
-  }
-
-  _hasAutoCheckedAppUpdateThisSession = true;
-  _isAutoCheckingAppUpdateThisSession = true;
-  try {
-    final localVersion = await _readInstalledAppVersion();
-    final manifest = await const _GiteeCloudSyncService()
-        .fetchAppUpdateManifest();
-
-    if (!context.mounted ||
-        localVersion == null ||
-        manifest == null ||
-        !manifest.isNewerThan(localVersion) ||
-        !manifest.hasDownloadUrl) {
-      return;
-    }
-
-    if (!manifest.forceUpdate) {
-      return;
-    }
-
-    final shouldDownload = await _showCloudAppUpdateDialog(
-      context,
-      manifest,
-      localVersion: localVersion,
-    );
-    if (!shouldDownload || !context.mounted) {
-      return;
-    }
-
-    await _performAppUpdateDownloadAndInstall(context, manifest);
-  } catch (error) {
-    debugPrint('Auto app update check failed: $error');
-  } finally {
-    _isAutoCheckingAppUpdateThisSession = false;
-  }
-}
 
 class CloudSyncPage extends StatefulWidget {
   final CloudBundleBuilder buildLocalBundle;
@@ -537,7 +62,7 @@ class CloudSyncPage extends StatefulWidget {
 }
 
 class _CloudSyncPageState extends State<CloudSyncPage> {
-  final _service = const _GiteeCloudSyncService();
+  final _service = const GiteeCloudSyncService();
   late final TextEditingController _usernameCtrl;
   late final TextEditingController _passwordCtrl;
   late final TextEditingController _guestNameCtrl;
@@ -562,13 +87,13 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
   bool _diffNoticeIsError = false;
   String? _appUpdateNoticeMessage;
   bool _appUpdateNoticeIsError = false;
-  _CloudBundleSnapshot? _localSnapshot;
-  _CloudBundleSnapshot? _remoteSnapshot;
-  _LocalAppVersion? _localAppVersion;
-  _CloudAppUpdateManifest? _remoteAppUpdateManifest;
+  CloudBundleSnapshot? _localSnapshot;
+  CloudBundleSnapshot? _remoteSnapshot;
+  LocalAppVersion? _localAppVersion;
+  CloudAppUpdateManifest? _remoteAppUpdateManifest;
   List<String> _diffSummary = const <String>[];
-  List<_CloudGuestSubmission> _guestSubmissions =
-      const <_CloudGuestSubmission>[];
+  List<CloudGuestSubmission> _guestSubmissions =
+      const <CloudGuestSubmission>[];
   CloudSyncApplySelection _lastPullSelection =
       const CloudSyncApplySelection.all();
   double? _appUpdateDownloadProgress;
@@ -582,7 +107,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
   void initState() {
     super.initState();
     _usernameCtrl = TextEditingController(
-      text: _GiteeCloudSyncConfig.adminUser,
+      text: GiteeCloudSyncConfig.adminUser,
     );
     _passwordCtrl = TextEditingController();
     _guestNameCtrl = TextEditingController();
@@ -599,14 +124,14 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
   }
 
   void _maybeAutoCheckForAppUpdate() {
-    if (!mounted || _hasAutoCheckedAppUpdateThisSession) {
+    if (!mounted || hasAutoCheckedAppUpdateThisSession) {
       return;
     }
     if (_localAppVersion == null || _remoteAppUpdateManifest == null) {
       return;
     }
 
-    _hasAutoCheckedAppUpdateThisSession = true;
+    hasAutoCheckedAppUpdateThisSession = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
@@ -661,7 +186,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
 
   Future<void> _loadLocalAppVersion() async {
     try {
-      final localVersion = await _readInstalledAppVersion();
+      final localVersion = await readInstalledAppVersion();
       if (localVersion == null) {
         throw Exception('未能读取本机安装版本');
       }
@@ -718,7 +243,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
     await _refreshAppUpdateManifest();
   }
 
-  Future<_CloudAppUpdateManifest?> _refreshAppUpdateManifest({
+  Future<CloudAppUpdateManifest?> _refreshAppUpdateManifest({
     bool silent = true,
   }) async {
     if (!mounted) {
@@ -798,19 +323,19 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
       _diffNoticeIsError = false;
     });
 
-    _CloudBundleSnapshot? localSnapshot;
-    _CloudBundleSnapshot? remoteSnapshot;
+    CloudBundleSnapshot? localSnapshot;
+    CloudBundleSnapshot? remoteSnapshot;
     final diffSummary = <String>[];
     String? noticeMessage;
     var noticeIsError = false;
 
     try {
       final localBundle = await widget.buildLocalBundle();
-      localSnapshot = _CloudBundleSnapshot.fromBundle(localBundle);
+      localSnapshot = CloudBundleSnapshot.fromBundle(localBundle);
 
       try {
         final remoteBundle = await _service.downloadBundle(manifest: manifest);
-        remoteSnapshot = _CloudBundleSnapshot.fromBundle(remoteBundle);
+        remoteSnapshot = CloudBundleSnapshot.fromBundle(remoteBundle);
         diffSummary.addAll(_buildDiffSummary(localSnapshot, remoteSnapshot));
       } catch (error) {
         if (_isMissingRemoteBundleError(error)) {
@@ -852,10 +377,10 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
 
     try {
       final submissions = await _service.fetchGuestSubmissions();
-      Map<String, dynamic> remoteReviewBundle = _emptyReviewTargetBundle();
+      Map<String, dynamic> remoteReviewBundle = emptyReviewTargetBundle();
       try {
         final remoteBundle = await _service.downloadBundle(manifest: manifest);
-        remoteReviewBundle = _buildReviewTargetBundle(remoteBundle);
+        remoteReviewBundle = buildReviewTargetBundle(remoteBundle);
       } catch (error) {
         if (!_isMissingRemoteBundleError(error)) {
           rethrow;
@@ -866,7 +391,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
           submissions
               .map(
                 (submission) => submission.copyWith(
-                  reviewDiff: _buildReviewDiff(
+                  reviewDiff: buildReviewDiff(
                     candidateReviewBundle: submission.reviewBundle,
                     remoteReviewBundle: remoteReviewBundle,
                   ),
@@ -879,7 +404,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
         return;
       }
       setState(() {
-        _guestSubmissions = List<_CloudGuestSubmission>.unmodifiable(resolved);
+        _guestSubmissions = List<CloudGuestSubmission>.unmodifiable(resolved);
       });
     } catch (error) {
       if (!mounted) {
@@ -1082,7 +607,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
   }
 
   String _buildGuestSubmitConfirmMessage(
-    _CloudReviewDiff diff, {
+    CloudReviewDiff diff, {
     required bool hasRemoteBundle,
   }) {
     final parts = <String>[
@@ -1106,7 +631,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
   }
 
   String _buildGuestReviewConfirmMessage(
-    _CloudGuestSubmission submission, {
+    CloudGuestSubmission submission, {
     required bool approve,
   }) {
     final diff = submission.pendingReviewDiff;
@@ -1131,8 +656,8 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
   }
 
   List<String> _buildDiffSummary(
-    _CloudBundleSnapshot local,
-    _CloudBundleSnapshot remote,
+    CloudBundleSnapshot local,
+    CloudBundleSnapshot remote,
   ) {
     final lines = <String>[];
 
@@ -1142,7 +667,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
       );
     }
 
-    final inspectionNameDiff = _formatBidirectionalDifference(
+    final inspectionNameDiff = formatBidirectionalDifference(
       local.inspectionNames,
       remote.inspectionNames,
     );
@@ -1159,7 +684,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
       );
     }
 
-    final meterRoomNameDiff = _formatBidirectionalDifference(
+    final meterRoomNameDiff = formatBidirectionalDifference(
       local.meterRoomNames,
       remote.meterRoomNames,
     );
@@ -1175,7 +700,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
       );
     }
 
-    final overloadSlotDiff = _formatBidirectionalDifference(
+    final overloadSlotDiff = formatBidirectionalDifference(
       local.overloadSlotLabels,
       remote.overloadSlotLabels,
     );
@@ -1199,18 +724,18 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
       }
     }
     if (changedOverloadSlots.isNotEmpty) {
-      lines.add('动力超标模板变化：${_previewItems(changedOverloadSlots)}');
+      lines.add('动力超标模板变化：${previewItems(changedOverloadSlots)}');
     }
 
     final changedWatermarkFields = <String>[];
     for (final entry in _cloudSyncWatermarkFieldLabels.entries) {
-      if (_stableJsonString(local.watermarkTemplate[entry.key]) !=
-          _stableJsonString(remote.watermarkTemplate[entry.key])) {
+      if (stableJsonString(local.watermarkTemplate[entry.key]) !=
+          stableJsonString(remote.watermarkTemplate[entry.key])) {
         changedWatermarkFields.add(entry.value);
       }
     }
     if (changedWatermarkFields.isNotEmpty) {
-      lines.add('水印参数差异：${_previewItems(changedWatermarkFields)}');
+      lines.add('水印参数差异：${previewItems(changedWatermarkFields)}');
     }
 
     final changedPreferenceLabels = <String>[];
@@ -1222,13 +747,13 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
       if (_cloudSyncIgnoredPreferenceDiffKeys.contains(key)) {
         continue;
       }
-      if (_stableJsonString(local.appPreferences[key]) !=
-          _stableJsonString(remote.appPreferences[key])) {
+      if (stableJsonString(local.appPreferences[key]) !=
+          stableJsonString(remote.appPreferences[key])) {
         changedPreferenceLabels.add(_cloudSyncPreferenceLabels[key] ?? key);
       }
     }
     if (changedPreferenceLabels.isNotEmpty) {
-      lines.add('应用参数差异：${_previewItems(changedPreferenceLabels)}');
+      lines.add('应用参数差异：${previewItems(changedPreferenceLabels)}');
     }
 
     return lines;
@@ -1237,8 +762,8 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
   Future<void> _login() async {
     final username = _usernameCtrl.text.trim();
     final password = _passwordCtrl.text;
-    if (username != _GiteeCloudSyncConfig.adminUser ||
-        password != _GiteeCloudSyncConfig.adminPassword) {
+    if (username != GiteeCloudSyncConfig.adminUser ||
+        password != GiteeCloudSyncConfig.adminPassword) {
       if (!mounted) {
         return;
       }
@@ -1359,8 +884,8 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
     return result == true;
   }
 
-  Future<bool> _showAppUpdateDialog(_CloudAppUpdateManifest manifest) async {
-    return _showCloudAppUpdateDialog(
+  Future<bool> _showAppUpdateDialog(CloudAppUpdateManifest manifest) async {
+    return showCloudAppUpdateDialog(
       context,
       manifest,
       localVersion: _localAppVersion,
@@ -1451,7 +976,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
   }
 
   Future<void> _downloadAndInstallUpdate(
-    _CloudAppUpdateManifest manifest,
+    CloudAppUpdateManifest manifest,
   ) async {
     if (_isDownloadingAppUpdate || _isPublishingAppUpdate) {
       return;
@@ -1463,7 +988,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
         _appUpdateNoticeMessage = '正在下载更新包...';
         _appUpdateNoticeIsError = false;
       });
-      await _performAppUpdateDownloadAndInstall(
+      await performAppUpdateDownloadAndInstall(
         context,
         manifest,
         onStatus: (message, isError) {
@@ -1547,7 +1072,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
       });
 
       final published = await _service.publishAppUpdateManifest(
-        _CloudAppUpdateManifest(
+        CloudAppUpdateManifest(
           versionName: versionName,
           versionCode: versionCode,
           title: title,
@@ -1725,7 +1250,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
 
     try {
       final localBundle = await widget.buildLocalBundle();
-      final reviewBundle = _buildReviewTargetBundle(localBundle);
+      final reviewBundle = buildReviewTargetBundle(localBundle);
 
       Map<String, dynamic> remoteBundle = <String, dynamic>{};
       var hasRemoteBundle = true;
@@ -1740,9 +1265,9 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
         }
       }
 
-      final diff = _buildReviewDiff(
+      final diff = buildReviewDiff(
         candidateReviewBundle: reviewBundle,
-        remoteReviewBundle: _buildReviewTargetBundle(remoteBundle),
+        remoteReviewBundle: buildReviewTargetBundle(remoteBundle),
       );
 
       if (hasRemoteBundle && diff.isEmpty) {
@@ -1821,7 +1346,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
   }
 
   Future<void> _reviewGuestSubmission(
-    _CloudGuestSubmission submission, {
+    CloudGuestSubmission submission, {
     required bool approve,
   }) async {
     if (_isBusy || !_isAdminLoggedIn || _isUpdateActionActive) {
@@ -1845,7 +1370,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
     try {
       final now = DateTime.now().toIso8601String();
       if (approve) {
-        Map<String, dynamic> remoteBundle = _emptyPublishedBundle();
+        Map<String, dynamic> remoteBundle = emptyPublishedBundle();
         try {
           remoteBundle = await _service.downloadBundle(manifest: _manifest);
         } catch (error) {
@@ -1853,7 +1378,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
             rethrow;
           }
         }
-        final mergedBundle = _mergeReviewBundleIntoFullBundle(
+        final mergedBundle = mergeReviewBundleIntoFullBundle(
           baseBundle: remoteBundle,
           reviewBundle: submission.reviewBundle,
         );
@@ -1865,8 +1390,8 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
 
       final updatedSubmission = submission.copyWith(
         status: approve
-            ? _guestSubmissionStatusApproved
-            : _guestSubmissionStatusRejected,
+            ? guestSubmissionStatusApproved
+            : guestSubmissionStatusRejected,
         reviewedAt: now,
         reviewedBy: _usernameCtrl.text.trim(),
       );
@@ -2037,22 +1562,22 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
     );
   }
 
-  Widget _buildGuestSubmissionStatusChip(_CloudGuestSubmission submission) {
+  Widget _buildGuestSubmissionStatusChip(CloudGuestSubmission submission) {
     final theme = Theme.of(context);
     final status = submission.status;
     final backgroundColor = switch (status) {
-      _guestSubmissionStatusApproved => Colors.green.withValues(alpha: 0.12),
-      _guestSubmissionStatusRejected => theme.colorScheme.errorContainer,
+      guestSubmissionStatusApproved => Colors.green.withValues(alpha: 0.12),
+      guestSubmissionStatusRejected => theme.colorScheme.errorContainer,
       _ => Colors.orange.withValues(alpha: 0.14),
     };
     final foregroundColor = switch (status) {
-      _guestSubmissionStatusApproved => Colors.green.shade700,
-      _guestSubmissionStatusRejected => theme.colorScheme.onErrorContainer,
+      guestSubmissionStatusApproved => Colors.green.shade700,
+      guestSubmissionStatusRejected => theme.colorScheme.onErrorContainer,
       _ => Colors.orange.shade800,
     };
     final label = switch (status) {
-      _guestSubmissionStatusApproved => '已并入',
-      _guestSubmissionStatusRejected => '已驳回',
+      guestSubmissionStatusApproved => '已并入',
+      guestSubmissionStatusRejected => '已驳回',
       _ => '待审核',
     };
     return Chip(
@@ -2110,7 +1635,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
     );
   }
 
-  Widget _buildGuestSubmissionCard(_CloudGuestSubmission submission) {
+  Widget _buildGuestSubmissionCard(CloudGuestSubmission submission) {
     final diff = submission.displayDiff;
     final inspectionLines = _composeSubmissionCategoryLines(
       added: diff.inspectionAdded,
@@ -2185,7 +1710,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
               ),
             ),
           if (_isAdminLoggedIn &&
-              submission.status == _guestSubmissionStatusPending) ...[
+              submission.status == guestSubmissionStatusPending) ...[
             const SizedBox(height: 12),
             Row(
               children: [
@@ -2233,17 +1758,17 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
     final remoteAppUpdateManifest = _remoteAppUpdateManifest;
     final pendingGuestCount = _guestSubmissions
         .where(
-          (submission) => submission.status == _guestSubmissionStatusPending,
+          (submission) => submission.status == guestSubmissionStatusPending,
         )
         .length;
     final approvedGuestCount = _guestSubmissions
         .where(
-          (submission) => submission.status == _guestSubmissionStatusApproved,
+          (submission) => submission.status == guestSubmissionStatusApproved,
         )
         .length;
     final rejectedGuestCount = _guestSubmissions
         .where(
-          (submission) => submission.status == _guestSubmissionStatusRejected,
+          (submission) => submission.status == guestSubmissionStatusRejected,
         )
         .length;
     final statusMessage = _statusMessage?.trim() ?? '';
@@ -2742,7 +2267,7 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
                 subtitle: Text(
-                  '${_GiteeCloudSyncConfig.repoOwner}/${_GiteeCloudSyncConfig.repoName}',
+                  '${GiteeCloudSyncConfig.repoOwner}/${GiteeCloudSyncConfig.repoName}',
                 ),
                 children: [
                   Align(
@@ -2752,18 +2277,18 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
                       children: [
                         const Text('同步方式：Gitee Contents API'),
                         const SizedBox(height: 6),
-                        Text('分支：${_GiteeCloudSyncConfig.branch}'),
+                        Text('分支：${GiteeCloudSyncConfig.branch}'),
                         const SizedBox(height: 4),
-                        Text('配置文件：${_GiteeCloudSyncConfig.configFilePath}'),
+                        Text('配置文件：${GiteeCloudSyncConfig.configFilePath}'),
                         const SizedBox(height: 4),
                         Text(
-                          '数据文件：${dataFilePath.isEmpty ? _GiteeCloudSyncConfig.dataFilePath : dataFilePath}',
+                          '数据文件：${dataFilePath.isEmpty ? GiteeCloudSyncConfig.dataFilePath : dataFilePath}',
                         ),
                         const SizedBox(height: 4),
-                        Text('版本文件：${_GiteeCloudSyncConfig.appUpdateFilePath}'),
+                        Text('版本文件：${GiteeCloudSyncConfig.appUpdateFilePath}'),
                         const SizedBox(height: 4),
                         Text(
-                          '游客提交目录：${_GiteeCloudSyncConfig.guestSubmissionDirectoryPath}',
+                          '游客提交目录：${GiteeCloudSyncConfig.guestSubmissionDirectoryPath}',
                         ),
                       ],
                     ),
@@ -2873,19 +2398,19 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
                     ),
                     const SizedBox(height: 12),
                     Text(
-                      '本机默认水印地址：${_formatWatermarkFieldValue(localSnapshot?.watermarkTemplate, 'defaultLocationFallback')}',
+                      '本机默认水印地址：${formatWatermarkFieldValue(localSnapshot?.watermarkTemplate, 'defaultLocationFallback')}',
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      '云端默认水印地址：${_formatWatermarkFieldValue(remoteSnapshot?.watermarkTemplate, 'defaultLocationFallback')}',
+                      '云端默认水印地址：${formatWatermarkFieldValue(remoteSnapshot?.watermarkTemplate, 'defaultLocationFallback')}',
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      '本机默认验证文案：${_formatWatermarkFieldValue(localSnapshot?.watermarkTemplate, 'defaultImprintText')}',
+                      '本机默认验证文案：${formatWatermarkFieldValue(localSnapshot?.watermarkTemplate, 'defaultImprintText')}',
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      '云端默认验证文案：${_formatWatermarkFieldValue(remoteSnapshot?.watermarkTemplate, 'defaultImprintText')}',
+                      '云端默认验证文案：${formatWatermarkFieldValue(remoteSnapshot?.watermarkTemplate, 'defaultImprintText')}',
                     ),
                     if (_diffNoticeMessage != null &&
                         _diffNoticeMessage!.trim().isNotEmpty) ...[
@@ -3010,1398 +2535,5 @@ class _CloudSyncPageState extends State<CloudSyncPage> {
   }
 }
 
-class _GiteeCloudFile {
-  final String path;
-  final String content;
-  final String sha;
 
-  const _GiteeCloudFile({
-    required this.path,
-    required this.content,
-    required this.sha,
-  });
-}
 
-class _CloudBundleSnapshot {
-  final int inspectionItemCount;
-  final Set<String> inspectionNames;
-  final String inspectionFingerprint;
-  final int meterRoomCount;
-  final int meterDeviceCount;
-  final Set<String> meterRoomNames;
-  final String meterRoomsFingerprint;
-  final int overloadTemplateCount;
-  final int overloadRoomCount;
-  final int overloadDeviceCount;
-  final Map<String, _CloudOverloadSlotSnapshot> overloadSlots;
-  final Map<String, dynamic> appPreferences;
-  final Map<String, dynamic> watermarkTemplate;
-
-  const _CloudBundleSnapshot({
-    required this.inspectionItemCount,
-    required this.inspectionNames,
-    required this.inspectionFingerprint,
-    required this.meterRoomCount,
-    required this.meterDeviceCount,
-    required this.meterRoomNames,
-    required this.meterRoomsFingerprint,
-    required this.overloadTemplateCount,
-    required this.overloadRoomCount,
-    required this.overloadDeviceCount,
-    required this.overloadSlots,
-    required this.appPreferences,
-    required this.watermarkTemplate,
-  });
-
-  Set<String> get overloadSlotLabels => overloadSlots.keys.toSet();
-
-  String get summaryText =>
-      '房间模板 $inspectionItemCount 个，抄表 $meterRoomCount 个房间 / $meterDeviceCount 台设备，超标 $overloadTemplateCount 个时段 / $overloadRoomCount 个房间 / $overloadDeviceCount 台设备，参数 ${appPreferences.length} 项';
-
-  factory _CloudBundleSnapshot.fromBundle(Map<String, dynamic> bundle) {
-    final inspectionItems = _asMapList(bundle['inspectionItems']);
-    final inspectionComparable = inspectionItems
-        .map(
-          (item) => <String, dynamic>{
-            'id': item['id'],
-            'name': _normalizedText(item['name']),
-            'type': _normalizedText(item['type']),
-            'location': _normalizedText(item['location']),
-            'serial': _normalizedText(item['serial']),
-          },
-        )
-        .toList(growable: false);
-    final inspectionNames = inspectionComparable
-        .map((item) => _normalizedText(item['name']))
-        .where((name) => name.isNotEmpty)
-        .toSet();
-
-    final meterRooms = _asMapList(bundle['meterRooms']);
-    var meterDeviceCount = 0;
-    final meterComparable = <Map<String, dynamic>>[];
-    final meterRoomNames = <String>{};
-    for (var index = 0; index < meterRooms.length; index++) {
-      final room = meterRooms[index];
-      final roomName = _displayRoomName(room, index + 1);
-      final devices = _asMapList(room['devices']);
-      meterDeviceCount += devices.length;
-      meterRoomNames.add(roomName);
-      meterComparable.add(<String, dynamic>{
-        'roomId': room['roomId'],
-        'roomName': roomName,
-        'roomType': _normalizedText(room['roomType']),
-        'location': _normalizedText(room['location']),
-        'devices': devices
-            .map(
-              (device) => <String, dynamic>{
-                'name': _normalizedText(device['name']),
-              },
-            )
-            .toList(growable: false),
-      });
-    }
-
-    final overloadTemplates = _asMapList(bundle['overloadTemplates']);
-    var overloadRoomCount = 0;
-    var overloadDeviceCount = 0;
-    final overloadSlots = <String, _CloudOverloadSlotSnapshot>{};
-    for (var index = 0; index < overloadTemplates.length; index++) {
-      final entry = overloadTemplates[index];
-      final label = _normalizedText(entry['label']).isEmpty
-          ? '未命名时段${index + 1}'
-          : _normalizedText(entry['label']);
-      final rawData = _asStringMap(entry['rawData']);
-      final comparableRawData = Map<String, dynamic>.from(rawData)
-        ..remove('exportedAt');
-      final rooms = _asMapList(rawData['rooms']);
-      final roomCount = rooms.length;
-      final deviceCount = rooms.fold<int>(
-        0,
-        (sum, room) => sum + _asMapList(room['devices']).length,
-      );
-      overloadRoomCount += roomCount;
-      overloadDeviceCount += deviceCount;
-      overloadSlots[label] = _CloudOverloadSlotSnapshot(
-        label: label,
-        roomCount: roomCount,
-        deviceCount: deviceCount,
-        fingerprint: _stableJsonString(comparableRawData),
-      );
-    }
-
-    return _CloudBundleSnapshot(
-      inspectionItemCount: inspectionItems.length,
-      inspectionNames: inspectionNames,
-      inspectionFingerprint: _stableJsonString(inspectionComparable),
-      meterRoomCount: meterRooms.length,
-      meterDeviceCount: meterDeviceCount,
-      meterRoomNames: meterRoomNames,
-      meterRoomsFingerprint: _stableJsonString(meterComparable),
-      overloadTemplateCount: overloadTemplates.length,
-      overloadRoomCount: overloadRoomCount,
-      overloadDeviceCount: overloadDeviceCount,
-      overloadSlots: overloadSlots,
-      appPreferences: _asStringMap(bundle['appPreferences']),
-      watermarkTemplate: _asStringMap(bundle['watermarkTemplate']),
-    );
-  }
-}
-
-class _CloudOverloadSlotSnapshot {
-  final String label;
-  final int roomCount;
-  final int deviceCount;
-  final String fingerprint;
-
-  const _CloudOverloadSlotSnapshot({
-    required this.label,
-    required this.roomCount,
-    required this.deviceCount,
-    required this.fingerprint,
-  });
-}
-
-class _CloudReviewDiff {
-  final List<String> summaryLines;
-  final List<String> inspectionAdded;
-  final List<String> inspectionRemoved;
-  final List<String> inspectionChanged;
-  final int inspectionChangedCount;
-  final List<String> meterRoomAdded;
-  final List<String> meterRoomRemoved;
-  final List<String> meterRoomChanged;
-  final int meterRoomChangedCount;
-  final List<String> overloadSlotAdded;
-  final List<String> overloadSlotRemoved;
-  final List<String> overloadSlotChanged;
-  final int overloadSlotChangedCount;
-
-  const _CloudReviewDiff({
-    required this.summaryLines,
-    required this.inspectionAdded,
-    required this.inspectionRemoved,
-    required this.inspectionChanged,
-    required this.inspectionChangedCount,
-    required this.meterRoomAdded,
-    required this.meterRoomRemoved,
-    required this.meterRoomChanged,
-    required this.meterRoomChangedCount,
-    required this.overloadSlotAdded,
-    required this.overloadSlotRemoved,
-    required this.overloadSlotChanged,
-    required this.overloadSlotChangedCount,
-  });
-
-  const _CloudReviewDiff.empty()
-    : summaryLines = const <String>[],
-      inspectionAdded = const <String>[],
-      inspectionRemoved = const <String>[],
-      inspectionChanged = const <String>[],
-      inspectionChangedCount = 0,
-      meterRoomAdded = const <String>[],
-      meterRoomRemoved = const <String>[],
-      meterRoomChanged = const <String>[],
-      meterRoomChangedCount = 0,
-      overloadSlotAdded = const <String>[],
-      overloadSlotRemoved = const <String>[],
-      overloadSlotChanged = const <String>[],
-      overloadSlotChangedCount = 0;
-
-  bool get isEmpty =>
-      summaryLines.isEmpty &&
-      inspectionAdded.isEmpty &&
-      inspectionRemoved.isEmpty &&
-      inspectionChanged.isEmpty &&
-      meterRoomAdded.isEmpty &&
-      meterRoomRemoved.isEmpty &&
-      meterRoomChanged.isEmpty &&
-      overloadSlotAdded.isEmpty &&
-      overloadSlotRemoved.isEmpty &&
-      overloadSlotChanged.isEmpty;
-
-  Map<String, dynamic> toJson() => <String, dynamic>{
-    'summaryLines': summaryLines,
-    'inspectionAdded': inspectionAdded,
-    'inspectionRemoved': inspectionRemoved,
-    'inspectionChanged': inspectionChanged,
-    'inspectionChangedCount': inspectionChangedCount,
-    'meterRoomAdded': meterRoomAdded,
-    'meterRoomRemoved': meterRoomRemoved,
-    'meterRoomChanged': meterRoomChanged,
-    'meterRoomChangedCount': meterRoomChangedCount,
-    'overloadSlotAdded': overloadSlotAdded,
-    'overloadSlotRemoved': overloadSlotRemoved,
-    'overloadSlotChanged': overloadSlotChanged,
-    'overloadSlotChangedCount': overloadSlotChangedCount,
-  };
-
-  factory _CloudReviewDiff.fromJson(Map<String, dynamic> json) {
-    return _CloudReviewDiff(
-      summaryLines: _asStringList(json['summaryLines']),
-      inspectionAdded: _asStringList(json['inspectionAdded']),
-      inspectionRemoved: _asStringList(json['inspectionRemoved']),
-      inspectionChanged: _asStringList(json['inspectionChanged']),
-      inspectionChangedCount:
-          (json['inspectionChangedCount'] as num?)?.toInt() ??
-          _asStringList(json['inspectionChanged']).length,
-      meterRoomAdded: _asStringList(json['meterRoomAdded']),
-      meterRoomRemoved: _asStringList(json['meterRoomRemoved']),
-      meterRoomChanged: _asStringList(json['meterRoomChanged']),
-      meterRoomChangedCount:
-          (json['meterRoomChangedCount'] as num?)?.toInt() ??
-          _asStringList(json['meterRoomChanged']).length,
-      overloadSlotAdded: _asStringList(json['overloadSlotAdded']),
-      overloadSlotRemoved: _asStringList(json['overloadSlotRemoved']),
-      overloadSlotChanged: _asStringList(json['overloadSlotChanged']),
-      overloadSlotChangedCount:
-          (json['overloadSlotChangedCount'] as num?)?.toInt() ??
-          _asStringList(json['overloadSlotChanged']).length,
-    );
-  }
-}
-
-class _CloudGuestSubmission {
-  final String id;
-  final String filePath;
-  final String createdAt;
-  final String submittedBy;
-  final String note;
-  final String status;
-  final String baseCloudUpdatedAt;
-  final String? reviewedAt;
-  final String? reviewedBy;
-  final Map<String, dynamic> reviewBundle;
-  final _CloudReviewDiff submittedDiff;
-  final _CloudReviewDiff? reviewDiff;
-
-  const _CloudGuestSubmission({
-    required this.id,
-    required this.filePath,
-    required this.createdAt,
-    required this.submittedBy,
-    required this.note,
-    required this.status,
-    required this.baseCloudUpdatedAt,
-    required this.reviewedAt,
-    required this.reviewedBy,
-    required this.reviewBundle,
-    required this.submittedDiff,
-    required this.reviewDiff,
-  });
-
-  _CloudReviewDiff get pendingReviewDiff => reviewDiff ?? submittedDiff;
-
-  _CloudReviewDiff get displayDiff => status == _guestSubmissionStatusPending
-      ? pendingReviewDiff
-      : submittedDiff;
-
-  _CloudGuestSubmission copyWith({
-    String? status,
-    String? reviewedAt,
-    String? reviewedBy,
-    _CloudReviewDiff? reviewDiff,
-  }) {
-    return _CloudGuestSubmission(
-      id: id,
-      filePath: filePath,
-      createdAt: createdAt,
-      submittedBy: submittedBy,
-      note: note,
-      status: status ?? this.status,
-      baseCloudUpdatedAt: baseCloudUpdatedAt,
-      reviewedAt: reviewedAt ?? this.reviewedAt,
-      reviewedBy: reviewedBy ?? this.reviewedBy,
-      reviewBundle: reviewBundle,
-      submittedDiff: submittedDiff,
-      reviewDiff: reviewDiff ?? this.reviewDiff,
-    );
-  }
-
-  Map<String, dynamic> toJson() => <String, dynamic>{
-    'schemaVersion': 1,
-    'id': id,
-    'createdAt': createdAt,
-    'submittedBy': submittedBy,
-    'note': note,
-    'status': status,
-    'baseCloudUpdatedAt': baseCloudUpdatedAt,
-    'reviewedAt': reviewedAt,
-    'reviewedBy': reviewedBy,
-    'reviewBundle': reviewBundle,
-    'diff': submittedDiff.toJson(),
-  };
-
-  factory _CloudGuestSubmission.fromJson(
-    Map<String, dynamic> json, {
-    required String filePath,
-  }) {
-    return _CloudGuestSubmission(
-      id: _normalizedText(json['id']).isEmpty
-          ? path.posix.basenameWithoutExtension(filePath)
-          : _normalizedText(json['id']),
-      filePath: filePath,
-      createdAt: _normalizedText(json['createdAt']),
-      submittedBy: _normalizedText(json['submittedBy']).isEmpty
-          ? '游客'
-          : _normalizedText(json['submittedBy']),
-      note: _normalizedText(json['note']),
-      status: _normalizedText(json['status']).isEmpty
-          ? _guestSubmissionStatusPending
-          : _normalizedText(json['status']),
-      baseCloudUpdatedAt: _normalizedText(json['baseCloudUpdatedAt']),
-      reviewedAt: _normalizedText(json['reviewedAt']).isEmpty
-          ? null
-          : _normalizedText(json['reviewedAt']),
-      reviewedBy: _normalizedText(json['reviewedBy']).isEmpty
-          ? null
-          : _normalizedText(json['reviewedBy']),
-      reviewBundle: _asStringMap(json['reviewBundle']),
-      submittedDiff: _CloudReviewDiff.fromJson(_asStringMap(json['diff'])),
-      reviewDiff: null,
-    );
-  }
-}
-
-class _GiteeCloudSyncConfig {
-  static const String accessToken = '9f43664de2ca43df41b8c78b1ea88019';
-  static const String repoOwner = 'yxnbkls';
-  static const String repoName = 'storge';
-  static const String branch = 'master';
-  static const String configFilePath =
-      'photo_namer/photo_namer_cloud_config.json';
-  static const String dataFilePath = 'photo_namer/photo_namer_cloud_data.json';
-  static const String appUpdateFilePath =
-      'photo_namer/photo_namer_app_update.json';
-  static const String guestSubmissionDirectoryPath =
-      'photo_namer/guest_updates';
-
-  static const String adminUser = 'admin';
-  static const String adminPassword = '918891474';
-}
-
-class _GiteeCloudSyncService {
-  const _GiteeCloudSyncService();
-
-  Uri _contentsUri(String? targetPath, {bool avoidCache = false}) {
-    final queryParameters = <String, String>{
-      'access_token': _GiteeCloudSyncConfig.accessToken,
-      'ref': _GiteeCloudSyncConfig.branch,
-    };
-    if (avoidCache) {
-      queryParameters['t'] = DateTime.now().millisecondsSinceEpoch.toString();
-    }
-    final normalizedPath = targetPath?.trim() ?? '';
-    final requestPath = normalizedPath.isEmpty
-        ? '/api/v5/repos/${_GiteeCloudSyncConfig.repoOwner}/${_GiteeCloudSyncConfig.repoName}/contents'
-        : '/api/v5/repos/${_GiteeCloudSyncConfig.repoOwner}/${_GiteeCloudSyncConfig.repoName}/contents/$normalizedPath';
-    return Uri.https('gitee.com', requestPath, queryParameters);
-  }
-
-  Uri _blobUri(String sha) {
-    return Uri.https(
-      'gitee.com',
-      '/api/v5/repos/${_GiteeCloudSyncConfig.repoOwner}/${_GiteeCloudSyncConfig.repoName}/git/blobs/$sha',
-      <String, String>{'access_token': _GiteeCloudSyncConfig.accessToken},
-    );
-  }
-
-  String _decodeBase64Content(String rawContent) {
-    final normalized = rawContent.replaceAll('\n', '').trim();
-    return utf8.decode(base64Decode(normalized));
-  }
-
-  Future<List<Map<String, dynamic>>> _fetchDirectoryEntries(
-    String dirPath, {
-    bool avoidCache = false,
-  }) async {
-    final response = await http.get(
-      _contentsUri(dirPath.isEmpty ? null : dirPath, avoidCache: avoidCache),
-      headers: const <String, String>{'Cache-Control': 'no-cache'},
-    );
-    if (response.statusCode == 404) {
-      return const <Map<String, dynamic>>[];
-    }
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('读取云端目录失败(${response.statusCode})');
-    }
-
-    final decoded = jsonDecode(response.body);
-    if (decoded is List) {
-      return decoded
-          .whereType<Map>()
-          .map(
-            (entry) => Map<String, dynamic>.from(
-              entry.map((key, value) => MapEntry(key.toString(), value)),
-            ),
-          )
-          .toList();
-    }
-    if (decoded is Map<String, dynamic>) {
-      return <Map<String, dynamic>>[decoded];
-    }
-    throw const FormatException('云端目录响应格式不正确');
-  }
-
-  Future<String> _fetchBlobContentBySha(String sha) async {
-    final response = await http.get(
-      _blobUri(sha),
-      headers: const <String, String>{'Cache-Control': 'no-cache'},
-    );
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('读取云端 blob 失败(${response.statusCode})');
-    }
-
-    final decoded = jsonDecode(response.body);
-    if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('云端 blob 响应格式不正确');
-    }
-    return _decodeBase64Content((decoded['content'] ?? '').toString());
-  }
-
-  Future<_GiteeCloudFile?> fetchFile(
-    String filePath, {
-    bool avoidCache = false,
-  }) async {
-    final normalizedPath = filePath.trim();
-    if (normalizedPath.isEmpty) {
-      return null;
-    }
-
-    final parentDir = path.posix.dirname(normalizedPath);
-    final dirPath = parentDir == '.' ? '' : parentDir;
-    final fileName = path.posix.basename(normalizedPath);
-    final entries = await _fetchDirectoryEntries(
-      dirPath,
-      avoidCache: avoidCache,
-    );
-
-    Map<String, dynamic>? matched;
-    for (final entry in entries) {
-      final entryPath = (entry['path'] ?? '').toString();
-      final entryName = (entry['name'] ?? '').toString();
-      if (entryPath == normalizedPath || entryName == fileName) {
-        matched = entry;
-        break;
-      }
-    }
-    if (matched == null) {
-      return null;
-    }
-
-    final sha = (matched['sha'] ?? '').toString();
-    if (sha.isEmpty) {
-      throw const FormatException('云端文件缺少 sha 信息');
-    }
-
-    return _GiteeCloudFile(
-      path: (matched['path'] ?? normalizedPath).toString(),
-      content: await _fetchBlobContentBySha(sha),
-      sha: sha,
-    );
-  }
-
-  Future<void> upsertFile({
-    required String filePath,
-    required String content,
-    required String message,
-  }) async {
-    final existing = await fetchFile(filePath, avoidCache: true);
-    final body = <String, String>{
-      'access_token': _GiteeCloudSyncConfig.accessToken,
-      'content': base64Encode(utf8.encode(content)),
-      'message': message,
-      'branch': _GiteeCloudSyncConfig.branch,
-    };
-
-    late final http.Response response;
-    if (existing == null) {
-      response = await http.post(
-        _contentsUri(filePath),
-        headers: const <String, String>{
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: body,
-      );
-    } else {
-      body['sha'] = existing.sha;
-      response = await http.put(
-        _contentsUri(filePath),
-        headers: const <String, String>{
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: body,
-      );
-    }
-
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('写入云端文件失败(${response.statusCode}): ${response.body}');
-    }
-  }
-
-  Future<Map<String, dynamic>?> fetchManifest() async {
-    final file = await fetchFile(
-      _GiteeCloudSyncConfig.configFilePath,
-      avoidCache: true,
-    );
-    if (file == null) {
-      return null;
-    }
-    final decoded = jsonDecode(file.content);
-    if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('云端配置文件格式不正确');
-    }
-    return decoded;
-  }
-
-  Future<_CloudAppUpdateManifest?> fetchAppUpdateManifest() async {
-    final file = await fetchFile(
-      _GiteeCloudSyncConfig.appUpdateFilePath,
-      avoidCache: true,
-    );
-    if (file == null) {
-      return null;
-    }
-    final decoded = jsonDecode(file.content);
-    if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('云端版本文件格式不正确');
-    }
-    return _CloudAppUpdateManifest.fromJson(decoded);
-  }
-
-  Future<void> publishBundle(
-    Map<String, dynamic> bundle, {
-    required String operatorName,
-  }) async {
-    final now = DateTime.now().toIso8601String();
-    final dataPayload = <String, dynamic>{
-      ...bundle,
-      'publishedAt': now,
-      'publishedBy': operatorName,
-    };
-
-    await upsertFile(
-      filePath: _GiteeCloudSyncConfig.dataFilePath,
-      content: const JsonEncoder.withIndent('  ').convert(dataPayload),
-      message: 'photo_namer publish data $now',
-    );
-
-    final inspectionItems = bundle['inspectionItems'];
-    final meterRooms = bundle['meterRooms'];
-    final overloadTemplates = bundle['overloadTemplates'];
-
-    final manifest = <String, dynamic>{
-      'appId': 'photo_namer',
-      'appName': 'photo_namer',
-      'schemaVersion': 1,
-      'updatedAt': now,
-      'updatedBy': operatorName,
-      'repository': <String, dynamic>{
-        'owner': _GiteeCloudSyncConfig.repoOwner,
-        'name': _GiteeCloudSyncConfig.repoName,
-        'branch': _GiteeCloudSyncConfig.branch,
-      },
-      'configFilePath': _GiteeCloudSyncConfig.configFilePath,
-      'dataFilePath': _GiteeCloudSyncConfig.dataFilePath,
-      'categories': const <Map<String, String>>[
-        <String, String>{'id': 'inspectionItems', 'name': '房间模板'},
-        <String, String>{'id': 'meterRooms', 'name': '动力抄表模板'},
-        <String, String>{'id': 'overloadTemplates', 'name': '动力超标模板'},
-        <String, String>{'id': 'appPreferences', 'name': '应用参数模板'},
-        <String, String>{'id': 'watermarkTemplate', 'name': '水印参数模板'},
-      ],
-      'summary': <String, dynamic>{
-        'inspectionItemCount': inspectionItems is List
-            ? inspectionItems.length
-            : 0,
-        'meterRoomCount': meterRooms is List ? meterRooms.length : 0,
-        'overloadTemplateCount': overloadTemplates is List
-            ? overloadTemplates.length
-            : 0,
-      },
-    };
-
-    await upsertFile(
-      filePath: _GiteeCloudSyncConfig.configFilePath,
-      content: const JsonEncoder.withIndent('  ').convert(manifest),
-      message: 'photo_namer publish manifest $now',
-    );
-  }
-
-  Future<_CloudAppUpdateManifest> publishAppUpdateManifest(
-    _CloudAppUpdateManifest manifest, {
-    required String operatorName,
-  }) async {
-    final now = DateTime.now().toIso8601String();
-    final publishedManifest = _CloudAppUpdateManifest(
-      versionName: manifest.versionName,
-      versionCode: manifest.versionCode,
-      title: manifest.title,
-      downloadUrl: manifest.downloadUrl,
-      changelog: manifest.changelog,
-      forceUpdate: manifest.forceUpdate,
-      publishedAt: now,
-      publishedBy: operatorName,
-    );
-    await upsertFile(
-      filePath: _GiteeCloudSyncConfig.appUpdateFilePath,
-      content: const JsonEncoder.withIndent(
-        '  ',
-      ).convert(publishedManifest.toJson()),
-      message: 'photo_namer publish app update $now',
-    );
-    return publishedManifest;
-  }
-
-  Future<List<_CloudGuestSubmission>> fetchGuestSubmissions() async {
-    final entries = await _fetchDirectoryEntries(
-      _GiteeCloudSyncConfig.guestSubmissionDirectoryPath,
-      avoidCache: true,
-    );
-    final fileEntries = entries
-        .where((entry) {
-          final type = (entry['type'] ?? '').toString();
-          final name = (entry['name'] ?? '').toString().toLowerCase();
-          return type == 'file' && name.endsWith('.json');
-        })
-        .toList(growable: false);
-
-    final submissions = await Future.wait(
-      fileEntries.map((entry) async {
-        final sha = (entry['sha'] ?? '').toString();
-        if (sha.isEmpty) {
-          return null;
-        }
-        final content = await _fetchBlobContentBySha(sha);
-        final decoded = jsonDecode(content);
-        if (decoded is! Map) {
-          return null;
-        }
-        return _CloudGuestSubmission.fromJson(
-          Map<String, dynamic>.from(
-            decoded.map((key, value) => MapEntry(key.toString(), value)),
-          ),
-          filePath: (entry['path'] ?? '').toString(),
-        );
-      }),
-    );
-
-    return submissions.whereType<_CloudGuestSubmission>().toList()
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-  }
-
-  Future<_CloudGuestSubmission> submitGuestSubmission({
-    required Map<String, dynamic> reviewBundle,
-    required String submittedBy,
-    required String note,
-    required _CloudReviewDiff diff,
-    required String baseCloudUpdatedAt,
-  }) async {
-    final createdAt = DateTime.now().toIso8601String();
-    final id = 'guest_${DateTime.now().millisecondsSinceEpoch}';
-    final filePath =
-        '${_GiteeCloudSyncConfig.guestSubmissionDirectoryPath}/$id.json';
-    final submission = _CloudGuestSubmission(
-      id: id,
-      filePath: filePath,
-      createdAt: createdAt,
-      submittedBy: submittedBy,
-      note: note,
-      status: _guestSubmissionStatusPending,
-      baseCloudUpdatedAt: baseCloudUpdatedAt,
-      reviewedAt: null,
-      reviewedBy: null,
-      reviewBundle: reviewBundle,
-      submittedDiff: diff,
-      reviewDiff: diff,
-    );
-    await upsertFile(
-      filePath: filePath,
-      content: const JsonEncoder.withIndent('  ').convert(submission.toJson()),
-      message: 'photo_namer guest submission $createdAt',
-    );
-    return submission;
-  }
-
-  Future<void> saveGuestSubmission(_CloudGuestSubmission submission) async {
-    await upsertFile(
-      filePath: submission.filePath,
-      content: const JsonEncoder.withIndent('  ').convert(submission.toJson()),
-      message:
-          'photo_namer guest submission status ${submission.status} ${DateTime.now().toIso8601String()}',
-    );
-  }
-
-  Future<Map<String, dynamic>> downloadBundle({
-    Map<String, dynamic>? manifest,
-  }) async {
-    final resolvedManifest = manifest ?? await fetchManifest();
-    final dataFilePath =
-        (resolvedManifest?['dataFilePath'] ??
-                _GiteeCloudSyncConfig.dataFilePath)
-            .toString();
-    final file = await fetchFile(dataFilePath, avoidCache: true);
-    if (file == null) {
-      throw const FormatException('云端还没有可用的 photo_namer 配置数据');
-    }
-    final decoded = jsonDecode(file.content);
-    if (decoded is! Map<String, dynamic>) {
-      throw const FormatException('云端数据文件格式不正确');
-    }
-    return decoded;
-  }
-}
-
-List<Map<String, dynamic>> _asMapList(dynamic value) {
-  if (value is! List) {
-    return const <Map<String, dynamic>>[];
-  }
-  return value
-      .whereType<Map>()
-      .map(
-        (entry) => Map<String, dynamic>.from(
-          entry.map((key, value) => MapEntry(key.toString(), value)),
-        ),
-      )
-      .toList(growable: false);
-}
-
-Map<String, dynamic> _asStringMap(dynamic value) {
-  if (value is! Map) {
-    return <String, dynamic>{};
-  }
-  return Map<String, dynamic>.from(
-    value.map((key, value) => MapEntry(key.toString(), value)),
-  );
-}
-
-List<String> _asStringList(dynamic value) {
-  if (value is! List) {
-    return const <String>[];
-  }
-  return value.map((item) => item.toString()).toList(growable: false);
-}
-
-String _normalizedText(dynamic value) => (value ?? '').toString().trim();
-
-String _displayRoomName(Map<String, dynamic> room, int index) {
-  final roomName = _normalizedText(room['roomName']);
-  if (roomName.isNotEmpty) {
-    return roomName;
-  }
-  final roomId = _normalizedText(room['roomId']);
-  if (roomId.isNotEmpty) {
-    return '房间#$roomId';
-  }
-  return '房间$index';
-}
-
-String? _formatBidirectionalDifference(Set<String> local, Set<String> remote) {
-  final localOnly = local.difference(remote);
-  final remoteOnly = remote.difference(local);
-  if (localOnly.isEmpty && remoteOnly.isEmpty) {
-    return null;
-  }
-
-  final parts = <String>[];
-  if (localOnly.isNotEmpty) {
-    parts.add('本机独有 ${_previewItems(localOnly)}');
-  }
-  if (remoteOnly.isNotEmpty) {
-    parts.add('云端独有 ${_previewItems(remoteOnly)}');
-  }
-  return parts.join('；');
-}
-
-String _previewItems(Iterable<String> items, {int limit = 3}) {
-  final normalized =
-      items.map((item) => item.trim()).where((item) => item.isNotEmpty).toList()
-        ..sort();
-  if (normalized.isEmpty) {
-    return '无';
-  }
-  if (normalized.length <= limit) {
-    return normalized.join('、');
-  }
-  final preview = normalized.take(limit).join('、');
-  return '$preview 等 ${normalized.length} 项';
-}
-
-String _formatWatermarkFieldValue(
-  Map<String, dynamic>? watermarkTemplate,
-  String key, {
-  String emptyLabel = '未设置',
-}) {
-  if (watermarkTemplate == null) {
-    return '暂无';
-  }
-  final value = (watermarkTemplate[key] ?? '').toString().trim();
-  if (value.isEmpty) {
-    return emptyLabel;
-  }
-  return value;
-}
-
-String _stableJsonString(dynamic value) {
-  return jsonEncode(_canonicalizeJsonLike(value));
-}
-
-dynamic _canonicalizeJsonLike(dynamic value) {
-  if (value is Map) {
-    final entries =
-        value.entries
-            .map(
-              (entry) => MapEntry(
-                entry.key.toString(),
-                _canonicalizeJsonLike(entry.value),
-              ),
-            )
-            .toList()
-          ..sort((a, b) => a.key.compareTo(b.key));
-    return <String, dynamic>{
-      for (final entry in entries) entry.key: entry.value,
-    };
-  }
-  if (value is List) {
-    return value
-        .map<dynamic>((item) => _canonicalizeJsonLike(item))
-        .toList(growable: false);
-  }
-  return value;
-}
-
-Map<String, dynamic> _emptyPublishedBundle() => <String, dynamic>{
-  'inspectionItems': const <Map<String, dynamic>>[],
-  'meterRooms': const <Map<String, dynamic>>[],
-  'overloadTemplates': const <Map<String, dynamic>>[],
-  'appPreferences': <String, dynamic>{},
-  'watermarkTemplate': <String, dynamic>{},
-};
-
-Map<String, dynamic> _emptyReviewTargetBundle() => <String, dynamic>{
-  'inspectionItems': const <Map<String, dynamic>>[],
-  'meterRooms': const <Map<String, dynamic>>[],
-  'overloadTemplates': const <Map<String, dynamic>>[],
-};
-
-Map<String, dynamic> _buildReviewTargetBundle(Map<String, dynamic> bundle) {
-  return <String, dynamic>{
-    'inspectionItems': _asMapList(bundle['inspectionItems']),
-    'meterRooms': _asMapList(bundle['meterRooms']),
-    'overloadTemplates': _asMapList(bundle['overloadTemplates']),
-  };
-}
-
-Map<String, dynamic> _mergeReviewBundleIntoFullBundle({
-  required Map<String, dynamic> baseBundle,
-  required Map<String, dynamic> reviewBundle,
-}) {
-  final merged = Map<String, dynamic>.from(_emptyPublishedBundle())
-    ..addAll(baseBundle);
-  merged['inspectionItems'] = _asMapList(reviewBundle['inspectionItems']);
-  merged['meterRooms'] = _asMapList(reviewBundle['meterRooms']);
-  merged['overloadTemplates'] = _asMapList(reviewBundle['overloadTemplates']);
-  merged['appPreferences'] = _asStringMap(merged['appPreferences']);
-  merged['watermarkTemplate'] = _asStringMap(merged['watermarkTemplate']);
-  return merged;
-}
-
-Map<String, Map<String, dynamic>> _indexRecords(
-  List<Map<String, dynamic>> items,
-  String Function(Map<String, dynamic> item, int index) keyBuilder,
-) {
-  final map = <String, Map<String, dynamic>>{};
-  for (var index = 0; index < items.length; index++) {
-    final item = items[index];
-    var key = keyBuilder(item, index).trim();
-    if (key.isEmpty) {
-      key = 'item_${index + 1}';
-    }
-    var dedupedKey = key;
-    var suffix = 2;
-    while (map.containsKey(dedupedKey)) {
-      dedupedKey = '$key#$suffix';
-      suffix++;
-    }
-    map[dedupedKey] = item;
-  }
-  return map;
-}
-
-String _inspectionKey(Map<String, dynamic> item, int index) {
-  final name = _normalizedText(item['name']);
-  if (name.isNotEmpty) {
-    return 'name:$name';
-  }
-  final serial = _normalizedText(item['serial']);
-  if (serial.isNotEmpty) {
-    return 'serial:$serial';
-  }
-  final id = _normalizedText(item['id']);
-  if (id.isNotEmpty) {
-    return 'id:$id';
-  }
-  return 'inspection_${index + 1}';
-}
-
-String _inspectionLabel(Map<String, dynamic> item) {
-  final name = _normalizedText(item['name']);
-  if (name.isNotEmpty) {
-    return name;
-  }
-  final serial = _normalizedText(item['serial']);
-  if (serial.isNotEmpty) {
-    return serial;
-  }
-  final id = _normalizedText(item['id']);
-  if (id.isNotEmpty) {
-    return '房间#$id';
-  }
-  return '未命名房间';
-}
-
-String _roomKey(Map<String, dynamic> room, int index) {
-  final roomName = _normalizedText(room['roomName']);
-  if (roomName.isNotEmpty) {
-    return 'room:$roomName';
-  }
-  final roomId = _normalizedText(room['roomId']);
-  if (roomId.isNotEmpty) {
-    return 'id:$roomId';
-  }
-  return 'room_${index + 1}';
-}
-
-String _roomLabel(Map<String, dynamic> room, int index) =>
-    _displayRoomName(room, index + 1);
-
-String _deviceKey(Map<String, dynamic> device, int index) {
-  final name = _normalizedText(device['name']);
-  if (name.isNotEmpty) {
-    return 'device:$name';
-  }
-  return 'device_${index + 1}';
-}
-
-String _deviceLabel(Map<String, dynamic> device, int index) {
-  final name = _normalizedText(device['name']);
-  if (name.isNotEmpty) {
-    return name;
-  }
-  return '设备${index + 1}';
-}
-
-String _overloadSlotLabel(Map<String, dynamic> entry, int index) {
-  final label = _normalizedText(entry['label']);
-  if (label.isNotEmpty) {
-    return label;
-  }
-  return '未命名时段${index + 1}';
-}
-
-String _displayOptionalText(dynamic value) {
-  final text = _normalizedText(value);
-  return text.isEmpty ? '未设置' : text;
-}
-
-List<String> _normalizedValueList(dynamic value) {
-  if (value is! List) {
-    return const <String>[];
-  }
-  return value.map((item) => item.toString().trim()).toList(growable: false);
-}
-
-bool _stringListsEqual(List<String> left, List<String> right) {
-  if (left.length != right.length) {
-    return false;
-  }
-  for (var index = 0; index < left.length; index++) {
-    if (left[index] != right[index]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-String _formatValueList(List<String> values) {
-  if (values.isEmpty) {
-    return '空';
-  }
-  return values.join('/');
-}
-
-void _appendFieldChange(
-  List<String> changes, {
-  required String label,
-  required dynamic remoteValue,
-  required dynamic candidateValue,
-}) {
-  final remoteText = _displayOptionalText(remoteValue);
-  final candidateText = _displayOptionalText(candidateValue);
-  if (remoteText != candidateText) {
-    changes.add('$label $remoteText -> $candidateText');
-  }
-}
-
-List<String> _sortedKeys(Iterable<String> keys) {
-  final list = keys.toList()..sort();
-  return list;
-}
-
-String _formatOverloadSlotOverview(Map<String, dynamic> entry, int index) {
-  final rooms = _asMapList(_asStringMap(entry['rawData'])['rooms']);
-  final deviceCount = rooms.fold<int>(
-    0,
-    (sum, room) => sum + _asMapList(room['devices']).length,
-  );
-  return '${_overloadSlotLabel(entry, index)}（${rooms.length} 房 / $deviceCount 台）';
-}
-
-List<String> _buildDeviceValueChangeLines({
-  required Map<String, Map<String, dynamic>> candidateDevices,
-  required Map<String, Map<String, dynamic>> remoteDevices,
-  required String prefix,
-}) {
-  final detailed = <String>[];
-  final changedNames = <String>[];
-  final commonKeys = _sortedKeys(
-    candidateDevices.keys.toSet().intersection(remoteDevices.keys.toSet()),
-  );
-  for (final key in commonKeys) {
-    final candidateDevice = candidateDevices[key]!;
-    final remoteDevice = remoteDevices[key]!;
-    final candidateValues = _normalizedValueList(candidateDevice['values']);
-    final remoteValues = _normalizedValueList(remoteDevice['values']);
-    if (_stringListsEqual(candidateValues, remoteValues)) {
-      continue;
-    }
-    final deviceName = _deviceLabel(candidateDevice, 0);
-    changedNames.add(deviceName);
-    if (changedNames.length <= 4) {
-      detailed.add(
-        '$prefix设备 $deviceName 参数 ${_formatValueList(remoteValues)} -> ${_formatValueList(candidateValues)}',
-      );
-    }
-  }
-  if (changedNames.length > 4) {
-    return <String>['$prefix设备模板有变化：${_previewItems(changedNames)}'];
-  }
-  return detailed;
-}
-
-_CloudReviewDiff _buildReviewDiff({
-  required Map<String, dynamic> candidateReviewBundle,
-  required Map<String, dynamic> remoteReviewBundle,
-}) {
-  final inspectionAdded = <String>[];
-  final inspectionRemoved = <String>[];
-  final inspectionChanged = <String>[];
-  final inspectionChangedLabels = <String>{};
-
-  final candidateInspection = _asMapList(
-    candidateReviewBundle['inspectionItems'],
-  );
-  final remoteInspection = _asMapList(remoteReviewBundle['inspectionItems']);
-  final candidateInspectionMap = _indexRecords(
-    candidateInspection,
-    _inspectionKey,
-  );
-  final remoteInspectionMap = _indexRecords(remoteInspection, _inspectionKey);
-  for (final key in _sortedKeys({
-    ...candidateInspectionMap.keys,
-    ...remoteInspectionMap.keys,
-  })) {
-    final candidateItem = candidateInspectionMap[key];
-    final remoteItem = remoteInspectionMap[key];
-    if (remoteItem == null && candidateItem != null) {
-      inspectionAdded.add(_inspectionLabel(candidateItem));
-      continue;
-    }
-    if (candidateItem == null && remoteItem != null) {
-      inspectionRemoved.add(_inspectionLabel(remoteItem));
-      continue;
-    }
-    if (candidateItem == null || remoteItem == null) {
-      continue;
-    }
-    final roomLabel = _inspectionLabel(candidateItem);
-    final changes = <String>[];
-    _appendFieldChange(
-      changes,
-      label: '名称',
-      remoteValue: remoteItem['name'],
-      candidateValue: candidateItem['name'],
-    );
-    _appendFieldChange(
-      changes,
-      label: '位置',
-      remoteValue: remoteItem['location'],
-      candidateValue: candidateItem['location'],
-    );
-    _appendFieldChange(
-      changes,
-      label: '类型',
-      remoteValue: remoteItem['type'],
-      candidateValue: candidateItem['type'],
-    );
-    _appendFieldChange(
-      changes,
-      label: '编号',
-      remoteValue: remoteItem['serial'],
-      candidateValue: candidateItem['serial'],
-    );
-    if (changes.isNotEmpty) {
-      inspectionChanged.add('$roomLabel：${changes.join('；')}');
-      inspectionChangedLabels.add(roomLabel);
-    }
-  }
-
-  final meterRoomAdded = <String>[];
-  final meterRoomRemoved = <String>[];
-  final meterRoomChanged = <String>[];
-  final meterRoomChangedLabels = <String>{};
-
-  final candidateMeterRooms = _asMapList(candidateReviewBundle['meterRooms']);
-  final remoteMeterRooms = _asMapList(remoteReviewBundle['meterRooms']);
-  final candidateMeterMap = _indexRecords(candidateMeterRooms, _roomKey);
-  final remoteMeterMap = _indexRecords(remoteMeterRooms, _roomKey);
-  for (final key in _sortedKeys({
-    ...candidateMeterMap.keys,
-    ...remoteMeterMap.keys,
-  })) {
-    final candidateRoom = candidateMeterMap[key];
-    final remoteRoom = remoteMeterMap[key];
-    if (remoteRoom == null && candidateRoom != null) {
-      meterRoomAdded.add(_roomLabel(candidateRoom, 0));
-      continue;
-    }
-    if (candidateRoom == null && remoteRoom != null) {
-      meterRoomRemoved.add(_roomLabel(remoteRoom, 0));
-      continue;
-    }
-    if (candidateRoom == null || remoteRoom == null) {
-      continue;
-    }
-    final roomLabel = _roomLabel(candidateRoom, 0);
-    final roomMetaChanges = <String>[];
-    _appendFieldChange(
-      roomMetaChanges,
-      label: '房间类型',
-      remoteValue: remoteRoom['roomType'],
-      candidateValue: candidateRoom['roomType'],
-    );
-    _appendFieldChange(
-      roomMetaChanges,
-      label: '位置',
-      remoteValue: remoteRoom['location'],
-      candidateValue: candidateRoom['location'],
-    );
-    if (roomMetaChanges.isNotEmpty) {
-      meterRoomChanged.add('$roomLabel：${roomMetaChanges.join('；')}');
-      meterRoomChangedLabels.add(roomLabel);
-    }
-
-    final candidateDevices = _asMapList(candidateRoom['devices']);
-    final remoteDevices = _asMapList(remoteRoom['devices']);
-    final candidateDeviceMap = _indexRecords(candidateDevices, _deviceKey);
-    final remoteDeviceMap = _indexRecords(remoteDevices, _deviceKey);
-    final addedDevices =
-        _sortedKeys(
-              candidateDeviceMap.keys.toSet().difference(
-                remoteDeviceMap.keys.toSet(),
-              ),
-            )
-            .map((deviceKey) => _deviceLabel(candidateDeviceMap[deviceKey]!, 0))
-            .toList();
-    final removedDevices = _sortedKeys(
-      remoteDeviceMap.keys.toSet().difference(candidateDeviceMap.keys.toSet()),
-    ).map((deviceKey) => _deviceLabel(remoteDeviceMap[deviceKey]!, 0)).toList();
-    if (addedDevices.isNotEmpty) {
-      meterRoomChanged.add(
-        '$roomLabel：新增设备 ${_previewItems(addedDevices, limit: 6)}',
-      );
-      meterRoomChangedLabels.add(roomLabel);
-    }
-    if (removedDevices.isNotEmpty) {
-      meterRoomChanged.add(
-        '$roomLabel：删除设备 ${_previewItems(removedDevices, limit: 6)}',
-      );
-      meterRoomChangedLabels.add(roomLabel);
-    }
-  }
-
-  final overloadSlotAdded = <String>[];
-  final overloadSlotRemoved = <String>[];
-  final overloadSlotChanged = <String>[];
-  final overloadSlotChangedLabels = <String>{};
-
-  final candidateOverloadTemplates = _asMapList(
-    candidateReviewBundle['overloadTemplates'],
-  );
-  final remoteOverloadTemplates = _asMapList(
-    remoteReviewBundle['overloadTemplates'],
-  );
-  final candidateOverloadMap = _indexRecords(
-    candidateOverloadTemplates,
-    (entry, index) => _overloadSlotLabel(entry, index),
-  );
-  final remoteOverloadMap = _indexRecords(
-    remoteOverloadTemplates,
-    (entry, index) => _overloadSlotLabel(entry, index),
-  );
-  for (final key in _sortedKeys({
-    ...candidateOverloadMap.keys,
-    ...remoteOverloadMap.keys,
-  })) {
-    final candidateSlot = candidateOverloadMap[key];
-    final remoteSlot = remoteOverloadMap[key];
-    if (remoteSlot == null && candidateSlot != null) {
-      overloadSlotAdded.add(_formatOverloadSlotOverview(candidateSlot, 0));
-      continue;
-    }
-    if (candidateSlot == null && remoteSlot != null) {
-      overloadSlotRemoved.add(_formatOverloadSlotOverview(remoteSlot, 0));
-      continue;
-    }
-    if (candidateSlot == null || remoteSlot == null) {
-      continue;
-    }
-    final slotLabel = _overloadSlotLabel(candidateSlot, 0);
-    final candidateRooms = _asMapList(
-      _asStringMap(candidateSlot['rawData'])['rooms'],
-    );
-    final remoteRooms = _asMapList(
-      _asStringMap(remoteSlot['rawData'])['rooms'],
-    );
-    final candidateRoomMap = _indexRecords(candidateRooms, _roomKey);
-    final remoteRoomMap = _indexRecords(remoteRooms, _roomKey);
-
-    final addedRooms = _sortedKeys(
-      candidateRoomMap.keys.toSet().difference(remoteRoomMap.keys.toSet()),
-    ).map((roomKey) => _roomLabel(candidateRoomMap[roomKey]!, 0)).toList();
-    final removedRooms = _sortedKeys(
-      remoteRoomMap.keys.toSet().difference(candidateRoomMap.keys.toSet()),
-    ).map((roomKey) => _roomLabel(remoteRoomMap[roomKey]!, 0)).toList();
-    if (addedRooms.isNotEmpty) {
-      overloadSlotChanged.add(
-        '$slotLabel：新增房间 ${_previewItems(addedRooms, limit: 6)}',
-      );
-      overloadSlotChangedLabels.add(slotLabel);
-    }
-    if (removedRooms.isNotEmpty) {
-      overloadSlotChanged.add(
-        '$slotLabel：删除房间 ${_previewItems(removedRooms, limit: 6)}',
-      );
-      overloadSlotChangedLabels.add(slotLabel);
-    }
-
-    for (final roomKey in _sortedKeys(
-      candidateRoomMap.keys.toSet().intersection(remoteRoomMap.keys.toSet()),
-    )) {
-      final candidateRoom = candidateRoomMap[roomKey]!;
-      final remoteRoom = remoteRoomMap[roomKey]!;
-      final roomLabel = _roomLabel(candidateRoom, 0);
-      final roomMetaChanges = <String>[];
-      _appendFieldChange(
-        roomMetaChanges,
-        label: '房间类型',
-        remoteValue: remoteRoom['roomType'],
-        candidateValue: candidateRoom['roomType'],
-      );
-      _appendFieldChange(
-        roomMetaChanges,
-        label: '位置',
-        remoteValue: remoteRoom['location'],
-        candidateValue: candidateRoom['location'],
-      );
-      if (roomMetaChanges.isNotEmpty) {
-        overloadSlotChanged.add(
-          '$slotLabel / $roomLabel：${roomMetaChanges.join('；')}',
-        );
-        overloadSlotChangedLabels.add(slotLabel);
-      }
-
-      final candidateDevices = _asMapList(candidateRoom['devices']);
-      final remoteDevices = _asMapList(remoteRoom['devices']);
-      final candidateDeviceMap = _indexRecords(candidateDevices, _deviceKey);
-      final remoteDeviceMap = _indexRecords(remoteDevices, _deviceKey);
-      final addedDevices =
-          _sortedKeys(
-                candidateDeviceMap.keys.toSet().difference(
-                  remoteDeviceMap.keys.toSet(),
-                ),
-              )
-              .map(
-                (deviceKey) => _deviceLabel(candidateDeviceMap[deviceKey]!, 0),
-              )
-              .toList();
-      final removedDevices =
-          _sortedKeys(
-                remoteDeviceMap.keys.toSet().difference(
-                  candidateDeviceMap.keys.toSet(),
-                ),
-              )
-              .map((deviceKey) => _deviceLabel(remoteDeviceMap[deviceKey]!, 0))
-              .toList();
-      if (addedDevices.isNotEmpty) {
-        overloadSlotChanged.add(
-          '$slotLabel / $roomLabel：新增设备 ${_previewItems(addedDevices, limit: 6)}',
-        );
-        overloadSlotChangedLabels.add(slotLabel);
-      }
-      if (removedDevices.isNotEmpty) {
-        overloadSlotChanged.add(
-          '$slotLabel / $roomLabel：删除设备 ${_previewItems(removedDevices, limit: 6)}',
-        );
-        overloadSlotChangedLabels.add(slotLabel);
-      }
-      final deviceValueChanges = _buildDeviceValueChangeLines(
-        candidateDevices: candidateDeviceMap,
-        remoteDevices: remoteDeviceMap,
-        prefix: '$slotLabel / $roomLabel：',
-      );
-      if (deviceValueChanges.isNotEmpty) {
-        overloadSlotChanged.addAll(deviceValueChanges);
-        overloadSlotChangedLabels.add(slotLabel);
-      }
-    }
-  }
-
-  final summaryLines = <String>[];
-  if (inspectionAdded.isNotEmpty ||
-      inspectionRemoved.isNotEmpty ||
-      inspectionChangedLabels.isNotEmpty) {
-    summaryLines.add(
-      '拍照房间：新增 ${inspectionAdded.length} 个，删除 ${inspectionRemoved.length} 个，修改 ${inspectionChangedLabels.length} 个',
-    );
-  }
-  if (meterRoomAdded.isNotEmpty ||
-      meterRoomRemoved.isNotEmpty ||
-      meterRoomChangedLabels.isNotEmpty) {
-    summaryLines.add(
-      '动力抄表模板：新增房间 ${meterRoomAdded.length} 个，删除 ${meterRoomRemoved.length} 个，修改房间 ${meterRoomChangedLabels.length} 个',
-    );
-  }
-  if (overloadSlotAdded.isNotEmpty ||
-      overloadSlotRemoved.isNotEmpty ||
-      overloadSlotChangedLabels.isNotEmpty) {
-    summaryLines.add(
-      '动力超标时段：新增时段 ${overloadSlotAdded.length} 个，删除时段 ${overloadSlotRemoved.length} 个，修改时段 ${overloadSlotChangedLabels.length} 个',
-    );
-  }
-
-  return _CloudReviewDiff(
-    summaryLines: List<String>.unmodifiable(summaryLines),
-    inspectionAdded: List<String>.unmodifiable(inspectionAdded),
-    inspectionRemoved: List<String>.unmodifiable(inspectionRemoved),
-    inspectionChanged: List<String>.unmodifiable(inspectionChanged),
-    inspectionChangedCount: inspectionChangedLabels.length,
-    meterRoomAdded: List<String>.unmodifiable(meterRoomAdded),
-    meterRoomRemoved: List<String>.unmodifiable(meterRoomRemoved),
-    meterRoomChanged: List<String>.unmodifiable(meterRoomChanged),
-    meterRoomChangedCount: meterRoomChangedLabels.length,
-    overloadSlotAdded: List<String>.unmodifiable(overloadSlotAdded),
-    overloadSlotRemoved: List<String>.unmodifiable(overloadSlotRemoved),
-    overloadSlotChanged: List<String>.unmodifiable(overloadSlotChanged),
-    overloadSlotChangedCount: overloadSlotChangedLabels.length,
-  );
-}

@@ -23,6 +23,8 @@ import 'package:photo_namer/capture_location_service.dart';
 import 'package:photo_namer/capture_weather_service.dart';
 import 'package:photo_namer/cloud_sync_page.dart';
 import 'package:photo_namer/models/app_enums.dart';
+import 'package:photo_namer/models/cloud_sync_models.dart';
+import 'package:photo_namer/services/app_update_service.dart';
 import 'package:photo_namer/models/camera_capture_result.dart';
 import 'package:photo_namer/models/inspection_calendar.dart';
 import 'package:photo_namer/models/inspection_item.dart';
