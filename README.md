@@ -161,6 +161,17 @@ build_release_package_arm64.bat
 
 - [docs/release_publish.md](docs/release_publish.md)
 
+### 发布签名
+
+release 包使用固定签名，密钥文件不入库，位于：
+
+- `android/app/photo-namer-release.keystore`
+- `android/key.properties`
+
+这两个文件请自行备份（网盘/U 盘）。换电脑或重装系统后把它们放回原位，
+新打的包才能与老设备上的安装保持同一签名、直接覆盖升级；
+若缺失会自动回退为本机调试密钥签名（仅本机有效）。
+
 ## 项目特点
 
 - 业务流程强绑定，偏现场巡检而不是通用拍照
