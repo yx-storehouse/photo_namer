@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/nativeCameraRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#FF000000"
+    android:orientation="vertical">
+
+    <FrameLayout
+        android:id="@+id/previewStage"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:clipChildren="false"
+        android:clipToPadding="false">
+
+        <!-- 预览固定成 3:4；想整体改变预览/成片比例时，优先改 targetCaptureSize 和这里的容器逻辑 -->
+        <com.example.photo_namer.ui.FixedAspectFrameLayout
+            android:id="@+id/previewFrame"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="center"
+            android:clipChildren="false"
+            android:clipToPadding="false">
+
+            <androidx.camera.view.PreviewView
+                android:id="@+id/previewView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:keepScreenOn="true" />
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="@drawable/bg_camera_preview_scrim" />
+
+            <!-- 整块水印贴边距离：
+                 paddingStart 调大 -> 整块往右
+                 paddingEnd 调大 -> 整块往左
+                 paddingBottom 调大 -> 整块往上
+                 建议每次先按 1dp 微调 -->
+            <FrameLayout
+                android:id="@+id/watermarkAnchor"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:clipChildren="false"
+                android:clipToPadding="false"
+                android:paddingStart="18dp"
+                android:paddingEnd="18dp"
+                android:paddingBottom="9dp">
+
+                <include
+                    layout="@layout/view_watermark_118_left"
+                    android:layout_gravity="bottom|start" />
+
+                <include
+                    layout="@layout/view_watermark_lr17"
+                    android:layout_gravity="bottom|end" />
+            </FrameLayout>
+
+            <View
+                android:id="@+id/captureFlashOverlay"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:alpha="0"
+                android:background="#F7FFFFFF"
+                android:clickable="false"
+                android:focusable="false"
+                android:visibility="gone" />
+        </com.example.photo_namer.ui.FixedAspectFrameLayout>
+
+        <LinearLayout
+            android:id="@+id/topBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="16dp"
+            android:paddingTop="16dp"
+            android:paddingEnd="16dp"
+            android:paddingBottom="12dp">
+
+            <TextView
+                android:id="@+id/btnBack"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_native_back_button"
+                android:fontFamily="@font/hy_qi_hei_x2_65w"
+                android:paddingStart="12dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="6dp"
+                android:text="返回"
+                android:textColor="#FFFFFFFF"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/tvCameraTitle"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_native_title_chip"
+                android:ellipsize="end"
+                android:fontFamily="@font/hy_qi_hei_x2_65w"
+                android:maxLines="1"
+                android:paddingStart="12dp"
+                android:paddingTop="8dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="8dp"
+                android:text="实时水印预览"
+                android:textColor="#FFFFFFFF"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/btnEditWatermark"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_native_back_button"
+                android:fontFamily="@font/hy_qi_hei_x2_65w"
+                android:paddingStart="12dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="6dp"
+                android:text="参数"
+                android:textColor="#FFFFFFFF"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/btnTuneWatermark"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_native_back_button"
+                android:fontFamily="@font/hy_qi_hei_x2_65w"
+                android:paddingStart="12dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="6dp"
+                android:text="调节"
+                android:textColor="#FFFFFFFF"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/btnRefreshLocationWeather"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_native_back_button"
+                android:fontFamily="@font/hy_qi_hei_x2_65w"
+                android:paddingStart="10dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="10dp"
+                android:paddingBottom="6dp"
+                android:text="定位天气"
+                android:textColor="#FFFFFFFF"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <FrameLayout
+            android:id="@+id/bottomControls"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:paddingBottom="14dp">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal|bottom"
+                android:gravity="center_horizontal"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/tvCaptureHint"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="10dp"
+                    android:fontFamily="@font/hy_qi_hei_x2_65w"
+                    android:includeFontPadding="false"
+                    android:letterSpacing="0.03"
+                    android:text="拍摄第 1 / 1 张"
+                    android:textColor="#CCFFFFFF"
+                    android:textSize="13sp"
+                    android:visibility="gone" />
+
+                <FrameLayout
+                    android:id="@+id/captureButtonShell"
+                    android:layout_width="92dp"
+                    android:layout_height="92dp">
+
+                    <View
+                        android:layout_width="92dp"
+                        android:layout_height="92dp"
+                        android:background="@drawable/bg_capture_button_outer" />
+
+                    <ImageButton
+                        android:id="@+id/btnCapture"
+                        android:layout_width="72dp"
+                        android:layout_height="72dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/bg_capture_button_inner"
+                        android:padding="18dp"
+                        android:src="@android:drawable/ic_menu_camera"
+                        android:tint="#FF111111" />
+                </FrameLayout>
+            </LinearLayout>
+        </FrameLayout>
+
+    </FrameLayout>
+
+</LinearLayout>

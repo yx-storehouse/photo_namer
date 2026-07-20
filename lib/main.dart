@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as path;
 import 'package:permission_handler/permission_handler.dart';
@@ -18,6 +19,20 @@ import 'package:share_plus/share_plus.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
+import 'package:flutter/services.dart'
+    show FilteringTextInputFormatter, rootBundle;
+
+import 'capture_location_service.dart';
+import 'cloud_sync_page.dart';
+import 'capture_weather_service.dart';
+import 'native_watermark_camera_bridge.dart';
+import 'native_watermark_camera_panel.dart';
+import 'native_watermark_camera_preview.dart';
+import 'raw_capture_batch_page.dart';
+import 'raw_capture_material_repository.dart';
+import 'rikka_page_transitions.dart';
+import 'watermark_capture_overlay.dart';
+import 'watermark_template_118.dart';
 
 // -------------------- Models --------------------
 class InspectionItem {
@@ -60,6 +75,53 @@ class InspectionItem {
   );
 }
 
+class CameraCaptureResult {
+  final XFile photo;
+  final Watermark118Data watermarkData;
+  final bool skipCompose;
+  final bool watermarkEnabled;
+  final bool preferNativeCompose;
+
+  const CameraCaptureResult({
+    required this.photo,
+    required this.watermarkData,
+    this.skipCompose = false,
+    this.watermarkEnabled = true,
+    this.preferNativeCompose = false,
+  });
+}
+
+Future<Map<String, dynamic>> _createInspectionZipInBackground(
+  Map<String, dynamic> request,
+) async {
+  final photoPaths = List<String>.from(
+    request['photoPaths'] as List<dynamic>? ?? const <dynamic>[],
+  );
+  final zipPath = (request['zipPath'] as String?)?.trim() ?? '';
+  if (zipPath.isEmpty) {
+    throw ArgumentError('zipPath is required');
+  }
+
+  final encoder = ZipFileEncoder();
+  encoder.create(zipPath);
+
+  var addedCount = 0;
+  try {
+    for (final photoPath in photoPaths) {
+      final file = File(photoPath);
+      if (!file.existsSync()) {
+        continue;
+      }
+      encoder.addFile(file);
+      addedCount++;
+    }
+  } finally {
+    encoder.close();
+  }
+
+  return <String, dynamic>{'zipPath': zipPath, 'addedCount': addedCount};
+}
+
 enum ConflictStrategy { overwrite, increment }
 
 enum OcrMode { local, online }
@@ -67,31 +129,111 @@ enum OcrMode { local, online }
 final RouteObserver<ModalRoute<void>> appRouteObserver =
     RouteObserver<ModalRoute<void>>();
 
-Route<T> buildAppRoute<T>(Widget page) {
-  return PageRouteBuilder<T>(
-    transitionDuration: const Duration(milliseconds: 300),
-    reverseTransitionDuration: const Duration(milliseconds: 240),
-    pageBuilder: (context, animation, secondaryAnimation) => page,
-    transitionsBuilder: (context, animation, secondaryAnimation, child) {
-      final curved = CurvedAnimation(
-        parent: animation,
-        curve: Curves.easeOutCubic,
-        reverseCurve: Curves.easeInCubic,
-      );
-      final slide = Tween<Offset>(
-        begin: const Offset(0.035, 0),
-        end: Offset.zero,
-      ).animate(curved);
-      final scale = Tween<double>(begin: 0.985, end: 1).animate(curved);
-      return FadeTransition(
-        opacity: curved,
-        child: SlideTransition(
-          position: slide,
-          child: ScaleTransition(scale: scale, child: child),
-        ),
-      );
-    },
-  );
+const String kPrefMeterOverloadTemplatesKey = 'meter_overload_templates';
+const String _bundledCloudDataAssetPath =
+    'assets/cloud/photo_namer_cloud_data.json';
+
+const List<MeterTimeSlotDefinition> kDefaultMeterTimeSlots = [
+  MeterTimeSlotDefinition(label: '2点', assetPath: 'csv/2点.json'),
+  MeterTimeSlotDefinition(label: '6点', assetPath: 'csv/6点.json'),
+  MeterTimeSlotDefinition(label: '12点', assetPath: 'csv/12点.json'),
+  MeterTimeSlotDefinition(label: '18点', assetPath: 'csv/18点.json'),
+  MeterTimeSlotDefinition(label: '22点', assetPath: 'csv/22点.json'),
+];
+
+Map<String, dynamic> _stringKeyedMap(dynamic raw) {
+  if (raw is! Map) {
+    return <String, dynamic>{};
+  }
+  return <String, dynamic>{
+    for (final entry in raw.entries) entry.key.toString(): entry.value,
+  };
+}
+
+List<Map<String, dynamic>> _stringKeyedMapList(dynamic raw) {
+  if (raw is! List) {
+    return <Map<String, dynamic>>[];
+  }
+  return raw.whereType<Map>().map(_stringKeyedMap).toList(growable: false);
+}
+
+Map<String, int> _intMapFromJson(dynamic raw) {
+  final source = _stringKeyedMap(raw);
+  final result = <String, int>{};
+  for (final entry in source.entries) {
+    final value = entry.value is num
+        ? (entry.value as num).toInt()
+        : int.tryParse(entry.value.toString());
+    if (value != null) {
+      result[entry.key] = value;
+    }
+  }
+  return result;
+}
+
+List<int> _intListFromJson(dynamic raw) {
+  if (raw is! List) {
+    return <int>[];
+  }
+  return raw
+      .map((value) => value is num ? value.toInt() : int.tryParse('$value'))
+      .whereType<int>()
+      .toList(growable: false);
+}
+
+String _cloudStringDefault(
+  Map<String, dynamic> source,
+  String key,
+  String fallback,
+) {
+  final value = source[key];
+  return value is String ? value : fallback;
+}
+
+bool _cloudBoolDefault(Map<String, dynamic> source, String key, bool fallback) {
+  final value = source[key];
+  return value is bool ? value : fallback;
+}
+
+int _cloudIntDefault(Map<String, dynamic> source, String key, int fallback) {
+  final value = source[key];
+  return value is num ? value.toInt() : fallback;
+}
+
+double _cloudDoubleDefault(
+  Map<String, dynamic> source,
+  String key,
+  double fallback,
+) {
+  final value = source[key];
+  return value is num ? value.toDouble() : fallback;
+}
+
+Future<Map<String, dynamic>?> _loadBundledCloudData() async {
+  try {
+    final raw = await rootBundle.loadString(_bundledCloudDataAssetPath);
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) {
+      throw const FormatException('内置云配置不是对象');
+    }
+    return _stringKeyedMap(decoded);
+  } catch (error) {
+    debugPrint('Load bundled cloud defaults failed: $error');
+    return null;
+  }
+}
+
+List<Map<String, dynamic>> _bundledInspectionDefaults(dynamic raw) {
+  return _stringKeyedMapList(raw)
+      .map((item) {
+        // The cloud snapshot contains device-specific photo state. Defaults start clean.
+        return <String, dynamic>{
+          ...item,
+          'photoPaths': const <String>[],
+          'isCompleted': false,
+        };
+      })
+      .toList(growable: false);
 }
 
 class FabMenuAction {
@@ -394,6 +536,531 @@ class MeterRoom {
   );
 }
 
+class MeterTimeSlotDefinition {
+  final String label;
+  final String assetPath;
+
+  const MeterTimeSlotDefinition({required this.label, required this.assetPath});
+}
+
+class MeterTimeSlotDataset {
+  final MeterTimeSlotDefinition slot;
+  final String exportedAt;
+  final Map<String, dynamic> rawData;
+  final List<MeterRoom> rooms;
+
+  const MeterTimeSlotDataset({
+    required this.slot,
+    required this.exportedAt,
+    required this.rawData,
+    required this.rooms,
+  });
+
+  int get roomCount => rooms.length;
+
+  int get deviceCount =>
+      rooms.fold<int>(0, (sum, room) => sum + room.devices.length);
+
+  int get currentValueCount => rooms.fold<int>(
+    0,
+    (sum, room) => sum + room.devices.fold<int>(0, (acc, d) => acc + 3),
+  );
+}
+
+const List<String> kInspectionCalendarWeekdayLabels = [
+  '一',
+  '二',
+  '三',
+  '四',
+  '五',
+  '六',
+  '日',
+];
+
+int? meterTimeSlotHourFromLabel(String label) {
+  final hourText = label.replaceAll('点', '').trim();
+  return int.tryParse(hourText);
+}
+
+int nearestMeterTimeSlotIndex(
+  DateTime now, {
+  List<MeterTimeSlotDefinition> slots = kDefaultMeterTimeSlots,
+}) {
+  if (slots.isEmpty) {
+    return 0;
+  }
+
+  final currentHourValue = now.hour + now.minute / 60.0;
+  var bestIndex = 0;
+  var bestDistance = double.infinity;
+
+  for (int index = 0; index < slots.length; index++) {
+    final slotHour = meterTimeSlotHourFromLabel(slots[index].label);
+    if (slotHour == null) {
+      continue;
+    }
+
+    final diff = (currentHourValue - slotHour).abs();
+    final circularDiff = math.min(diff, 24 - diff);
+    if (circularDiff < bestDistance) {
+      bestDistance = circularDiff;
+      bestIndex = index;
+    }
+  }
+
+  return bestIndex;
+}
+
+String nearestMeterTimeSlotLabel(
+  DateTime now, {
+  List<MeterTimeSlotDefinition> slots = kDefaultMeterTimeSlots,
+}) {
+  if (slots.isEmpty) {
+    return '';
+  }
+  return slots[nearestMeterTimeSlotIndex(now, slots: slots)].label;
+}
+
+String captureWeatherRefreshSlotKey(
+  DateTime now, {
+  List<MeterTimeSlotDefinition> slots = kDefaultMeterTimeSlots,
+}) {
+  final slotLabel = nearestMeterTimeSlotLabel(now, slots: slots).trim();
+  if (slotLabel.isEmpty) {
+    return '';
+  }
+  return '${formatInspectionCalendarDateKey(now)}|$slotLabel';
+}
+
+String formatInspectionCalendarDateKey(DateTime date) {
+  final local = date.toLocal();
+  final month = local.month.toString().padLeft(2, '0');
+  final day = local.day.toString().padLeft(2, '0');
+  return '${local.year}-$month-$day';
+}
+
+DateTime? parseInspectionCalendarDateKey(String raw) {
+  final parts = raw.trim().split('-');
+  if (parts.length != 3) {
+    return null;
+  }
+  final year = int.tryParse(parts[0]);
+  final month = int.tryParse(parts[1]);
+  final day = int.tryParse(parts[2]);
+  if (year == null || month == null || day == null) {
+    return null;
+  }
+  return DateTime(year, month, day);
+}
+
+DateTime normalizeInspectionCalendarMonth(DateTime date) {
+  final local = date.toLocal();
+  return DateTime(local.year, local.month);
+}
+
+class InspectionCalendarDayRecord {
+  final String dateKey;
+  final Set<String> completedSlots;
+  final String updatedAt;
+
+  const InspectionCalendarDayRecord({
+    required this.dateKey,
+    required this.completedSlots,
+    required this.updatedAt,
+  });
+
+  factory InspectionCalendarDayRecord.empty(String dateKey) {
+    return InspectionCalendarDayRecord(
+      dateKey: dateKey,
+      completedSlots: const <String>{},
+      updatedAt: '',
+    );
+  }
+
+  factory InspectionCalendarDayRecord.fromJson(
+    String dateKey,
+    Map<String, dynamic> json,
+  ) {
+    final rawCompletedSlots = json['completedSlots'];
+    final normalizedSlots = <String>{};
+    if (rawCompletedSlots is List) {
+      for (final entry in rawCompletedSlots) {
+        final label = entry.toString().trim();
+        if (label.isNotEmpty) {
+          normalizedSlots.add(label);
+        }
+      }
+    }
+    return InspectionCalendarDayRecord(
+      dateKey: dateKey,
+      completedSlots: normalizedSlots,
+      updatedAt: (json['updatedAt'] ?? '').toString(),
+    );
+  }
+
+  int get completedCount => completedSlots.length;
+
+  Map<String, dynamic> toJson() {
+    final sortedSlots = completedSlots.toList()..sort();
+    return <String, dynamic>{
+      'completedSlots': sortedSlots,
+      'updatedAt': updatedAt,
+    };
+  }
+
+  InspectionCalendarDayRecord copyWith({
+    Set<String>? completedSlots,
+    String? updatedAt,
+  }) {
+    return InspectionCalendarDayRecord(
+      dateKey: dateKey,
+      completedSlots: Set<String>.from(completedSlots ?? this.completedSlots),
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+}
+
+Map<String, InspectionCalendarDayRecord> cloneInspectionCalendarRecords(
+  Map<String, InspectionCalendarDayRecord> source,
+) {
+  return <String, InspectionCalendarDayRecord>{
+    for (final entry in source.entries)
+      entry.key: entry.value.copyWith(
+        completedSlots: Set<String>.from(entry.value.completedSlots),
+      ),
+  };
+}
+
+Map<String, InspectionCalendarDayRecord> decodeInspectionCalendarRecords(
+  String? raw,
+) {
+  if (raw == null || raw.trim().isEmpty) {
+    return <String, InspectionCalendarDayRecord>{};
+  }
+
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) {
+      return <String, InspectionCalendarDayRecord>{};
+    }
+
+    final normalized = <String, InspectionCalendarDayRecord>{};
+    for (final entry in decoded.entries) {
+      final dateKey = entry.key.toString().trim();
+      final value = entry.value;
+      if (dateKey.isEmpty || value is! Map) {
+        continue;
+      }
+
+      final record = InspectionCalendarDayRecord.fromJson(
+        dateKey,
+        Map<String, dynamic>.from(
+          value.map((key, dynamic value) => MapEntry(key.toString(), value)),
+        ),
+      );
+      if (record.completedSlots.isNotEmpty) {
+        normalized[dateKey] = record;
+      }
+    }
+    return normalized;
+  } catch (_) {
+    return <String, InspectionCalendarDayRecord>{};
+  }
+}
+
+String encodeInspectionCalendarRecords(
+  Map<String, InspectionCalendarDayRecord> records,
+) {
+  final normalized = <String, dynamic>{};
+  final sortedKeys = records.keys.toList()..sort();
+  for (final key in sortedKeys) {
+    final record = records[key];
+    if (record == null || record.completedSlots.isEmpty) {
+      continue;
+    }
+    normalized[key] = record.toJson();
+  }
+  return jsonEncode(normalized);
+}
+
+enum InspectionShiftType { morning, middle, night, rest }
+
+const List<InspectionShiftType> kInspectionShiftCycle = [
+  InspectionShiftType.morning,
+  InspectionShiftType.morning,
+  InspectionShiftType.middle,
+  InspectionShiftType.middle,
+  InspectionShiftType.night,
+  InspectionShiftType.night,
+  InspectionShiftType.rest,
+  InspectionShiftType.rest,
+];
+
+const Map<InspectionShiftType, List<String>> kInspectionShiftRequiredSlots = {
+  InspectionShiftType.morning: ['12点'],
+  InspectionShiftType.middle: ['18点'],
+  InspectionShiftType.night: ['22点', '2点', '6点'],
+  InspectionShiftType.rest: <String>[],
+};
+
+class InspectionShiftScheduleConfig {
+  final String firstMorningShiftDateKey;
+  final int rotationMemberCount;
+  final String firstInspectionDateKey;
+  final String firstInspectionSlotLabel;
+
+  const InspectionShiftScheduleConfig({
+    required this.firstMorningShiftDateKey,
+    required this.rotationMemberCount,
+    required this.firstInspectionDateKey,
+    required this.firstInspectionSlotLabel,
+  });
+
+  factory InspectionShiftScheduleConfig.fallback() {
+    final todayKey = formatInspectionCalendarDateKey(DateTime.now());
+    return InspectionShiftScheduleConfig(
+      firstMorningShiftDateKey: todayKey,
+      rotationMemberCount: 1,
+      firstInspectionDateKey: todayKey,
+      firstInspectionSlotLabel: '',
+    );
+  }
+
+  factory InspectionShiftScheduleConfig.fromJson(Map<String, dynamic> json) {
+    final fallback = InspectionShiftScheduleConfig.fallback();
+    final rawMorning = (json['firstMorningShiftDateKey'] ?? '')
+        .toString()
+        .trim();
+    if (rawMorning.isEmpty ||
+        parseInspectionCalendarDateKey(rawMorning) == null) {
+      return InspectionShiftScheduleConfig.fallback();
+    }
+
+    final rawRotationCount = int.tryParse(
+      (json['rotationMemberCount'] ?? '').toString().trim(),
+    );
+    final rotationMemberCount = math.max(1, rawRotationCount ?? 1);
+
+    final rawInspectionDate = (json['firstInspectionDateKey'] ?? '')
+        .toString()
+        .trim();
+    final firstInspectionDateKey =
+        rawInspectionDate.isNotEmpty &&
+            parseInspectionCalendarDateKey(rawInspectionDate) != null
+        ? rawInspectionDate
+        : fallback.firstInspectionDateKey;
+
+    final firstInspectionSlotLabel = (json['firstInspectionSlotLabel'] ?? '')
+        .toString()
+        .trim();
+
+    return InspectionShiftScheduleConfig(
+      firstMorningShiftDateKey: rawMorning,
+      rotationMemberCount: rotationMemberCount,
+      firstInspectionDateKey: firstInspectionDateKey,
+      firstInspectionSlotLabel: firstInspectionSlotLabel,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'firstMorningShiftDateKey': firstMorningShiftDateKey,
+      'rotationMemberCount': rotationMemberCount,
+      'firstInspectionDateKey': firstInspectionDateKey,
+      'firstInspectionSlotLabel': firstInspectionSlotLabel,
+    };
+  }
+
+  InspectionShiftScheduleConfig copyWith({
+    String? firstMorningShiftDateKey,
+    int? rotationMemberCount,
+    String? firstInspectionDateKey,
+    String? firstInspectionSlotLabel,
+  }) {
+    return InspectionShiftScheduleConfig(
+      firstMorningShiftDateKey:
+          firstMorningShiftDateKey ?? this.firstMorningShiftDateKey,
+      rotationMemberCount: rotationMemberCount ?? this.rotationMemberCount,
+      firstInspectionDateKey:
+          firstInspectionDateKey ?? this.firstInspectionDateKey,
+      firstInspectionSlotLabel:
+          firstInspectionSlotLabel ?? this.firstInspectionSlotLabel,
+    );
+  }
+}
+
+InspectionShiftScheduleConfig decodeInspectionShiftScheduleConfig(String? raw) {
+  if (raw == null || raw.trim().isEmpty) {
+    return InspectionShiftScheduleConfig.fallback();
+  }
+
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) {
+      return InspectionShiftScheduleConfig.fallback();
+    }
+    return InspectionShiftScheduleConfig.fromJson(
+      Map<String, dynamic>.from(
+        decoded.map((key, value) => MapEntry(key.toString(), value)),
+      ),
+    );
+  } catch (_) {
+    return InspectionShiftScheduleConfig.fallback();
+  }
+}
+
+String encodeInspectionShiftScheduleConfig(
+  InspectionShiftScheduleConfig config,
+) {
+  return jsonEncode(config.toJson());
+}
+
+DateTime normalizeInspectionCalendarDate(DateTime date) {
+  final local = date.toLocal();
+  return DateTime(local.year, local.month, local.day);
+}
+
+InspectionShiftType inspectionShiftTypeForDate(
+  DateTime date,
+  InspectionShiftScheduleConfig config,
+) {
+  final baseDate =
+      parseInspectionCalendarDateKey(config.firstMorningShiftDateKey) ??
+      normalizeInspectionCalendarDate(DateTime.now());
+  final normalizedDate = normalizeInspectionCalendarDate(date);
+  final diffDays = normalizedDate.difference(baseDate).inDays;
+  final cycleIndex =
+      ((diffDays % kInspectionShiftCycle.length) +
+          kInspectionShiftCycle.length) %
+      kInspectionShiftCycle.length;
+  return kInspectionShiftCycle[cycleIndex];
+}
+
+List<String> inspectionRequiredSlotsForShift(InspectionShiftType shiftType) {
+  return List<String>.from(
+    kInspectionShiftRequiredSlots[shiftType] ?? const <String>[],
+  );
+}
+
+DateTime inspectionRotationStartDateForConfig(
+  InspectionShiftScheduleConfig config,
+) {
+  return parseInspectionCalendarDateKey(config.firstInspectionDateKey) ??
+      normalizeInspectionCalendarDate(DateTime.now());
+}
+
+List<String> inspectionRequiredSlotsForDate(
+  DateTime date,
+  InspectionShiftScheduleConfig config,
+) {
+  return inspectionRequiredSlotsForShift(
+    inspectionShiftTypeForDate(date, config),
+  );
+}
+
+String resolveInspectionRotationStartSlotLabel(
+  InspectionShiftScheduleConfig config,
+) {
+  final startDate = inspectionRotationStartDateForConfig(config);
+  final candidateSlots = inspectionRequiredSlotsForDate(startDate, config);
+  if (candidateSlots.isEmpty) {
+    return '';
+  }
+
+  final stored = config.firstInspectionSlotLabel.trim();
+  if (stored.isNotEmpty && candidateSlots.contains(stored)) {
+    return stored;
+  }
+  return candidateSlots.first;
+}
+
+List<String> assignedInspectionSlotsForDate(
+  DateTime date,
+  InspectionShiftScheduleConfig config,
+) {
+  final targetDate = normalizeInspectionCalendarDate(date);
+  final startDate = inspectionRotationStartDateForConfig(config);
+  if (targetDate.isBefore(startDate)) {
+    return const <String>[];
+  }
+
+  final teamSize = math.max(1, config.rotationMemberCount);
+  final startSlotLabel = resolveInspectionRotationStartSlotLabel(config);
+  var rotationIndex = 0;
+  final assignedSlots = <String>[];
+
+  for (
+    DateTime cursor = startDate;
+    !cursor.isAfter(targetDate);
+    cursor = cursor.add(const Duration(days: 1))
+  ) {
+    final daySlots = inspectionRequiredSlotsForDate(cursor, config);
+    if (daySlots.isEmpty) {
+      continue;
+    }
+
+    var effectiveSlots = daySlots;
+    if (DateUtils.isSameDay(cursor, startDate)) {
+      final startIndex = daySlots.indexOf(startSlotLabel);
+      effectiveSlots = daySlots.sublist(startIndex >= 0 ? startIndex : 0);
+    }
+
+    for (final slot in effectiveSlots) {
+      if (rotationIndex % teamSize == 0 &&
+          DateUtils.isSameDay(cursor, targetDate)) {
+        assignedSlots.add(slot);
+      }
+      rotationIndex++;
+    }
+  }
+
+  return assignedSlots;
+}
+
+String matchedInspectionSlotLabelForMoment(
+  DateTime moment,
+  InspectionShiftScheduleConfig config,
+) {
+  final assignedSlots = assignedInspectionSlotsForDate(moment, config);
+  if (assignedSlots.isEmpty) {
+    return '';
+  }
+
+  final candidateSlots = kDefaultMeterTimeSlots
+      .where((slot) => assignedSlots.contains(slot.label))
+      .toList(growable: false);
+  if (candidateSlots.isEmpty) {
+    return assignedSlots.first;
+  }
+  return nearestMeterTimeSlotLabel(moment, slots: candidateSlots);
+}
+
+String inspectionShiftTypeLabel(InspectionShiftType shiftType) {
+  switch (shiftType) {
+    case InspectionShiftType.morning:
+      return '早班';
+    case InspectionShiftType.middle:
+      return '中班';
+    case InspectionShiftType.night:
+      return '晚班';
+    case InspectionShiftType.rest:
+      return '休息';
+  }
+}
+
+String inspectionShiftTypeShortLabel(InspectionShiftType shiftType) {
+  switch (shiftType) {
+    case InspectionShiftType.morning:
+      return '早';
+    case InspectionShiftType.middle:
+      return '中';
+    case InspectionShiftType.night:
+      return '晚';
+    case InspectionShiftType.rest:
+      return '休';
+  }
+}
+
 // -------------------- App --------------------
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -424,7 +1091,12 @@ class MyApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: seed),
         scaffoldBackgroundColor: const Color(0xFFF6F8FC),
       ),
-      home: HomePage(cameras: cameras),
+      onGenerateRoute: (settings) {
+        return buildAppRoute<void>(
+          page: HomePage(cameras: cameras),
+          settings: settings,
+        );
+      },
     );
   }
 }
@@ -467,7 +1139,8 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage>
+    with RouteAware, WidgetsBindingObserver {
   static const String _prefItemsKey = 'inspection_items';
   static const String _prefFolderKey = 'save_folder_name';
   static const String _prefSaveDirKey = 'save_directory_path';
@@ -490,10 +1163,34 @@ class _HomePageState extends State<HomePage> {
       'home_merged_uniform_height_enabled';
   static const String _prefMergedUltraCompactEnabledKey =
       'home_merged_ultra_compact_enabled';
+  static const String _prefCameraAttachDelayEnabledKey =
+      'camera_attach_delay_enabled';
+  static const String _prefCameraAttachDelayMsKey = 'camera_attach_delay_ms';
+  static const String _prefDefaultWatermarkEnabledKey =
+      'default_watermark_enabled';
+  static const String _prefIncomingCabinetOnlineOcrEnabledKey =
+      'incoming_cabinet_online_ocr_enabled';
+  static const String _prefDefaultWatermarkLocationFallbackKey =
+      'default_watermark_location_fallback';
+  static const String _prefDefaultWatermarkImprintTextKey =
+      'default_watermark_imprint_text';
+  static const String _prefCachedCaptureWeatherTextKey =
+      'cached_capture_weather_text';
+  static const String _prefLastWeatherRefreshSlotKey =
+      'last_weather_refresh_slot';
+  static const String _prefDirectCaptureSaveDirKey =
+      'direct_capture_save_directory_path';
+  static const String _prefInspectionCalendarRecordsKey =
+      'inspection_calendar_records';
+  static const String _prefInspectionShiftScheduleConfigKey =
+      'inspection_shift_schedule_config';
+  static const String _defaultDirectCaptureFolderName =
+      'PhotoNamer_DirectCapture';
 
   List<InspectionItem> _items = [];
   String _saveFolderName = 'PhotoNamer';
   String? _saveDirectoryPath;
+  String? _directCaptureSaveDirectoryPath;
   ConflictStrategy _strategy = ConflictStrategy.increment;
   String _sortBy = 'serial';
   List<MeterRoom> _meterRooms = [];
@@ -502,6 +1199,18 @@ class _HomePageState extends State<HomePage> {
   bool _mergedDeepSearchEnabled = true;
   bool _mergedUniformHeightEnabled = false;
   bool _mergedUltraCompactEnabled = false;
+  bool _cameraAttachDelayEnabled = true;
+  bool _defaultWatermarkEnabled = true;
+  bool _incomingCabinetOnlineOcrEnabled = false;
+  String _defaultWatermarkLocationFallback = '';
+  String _defaultWatermarkImprintText =
+      WatermarkTemplate118Composer.defaultImprintText;
+  String _cachedCaptureWeatherText =
+      WatermarkTemplate118Composer.defaultWeatherText;
+  Map<String, InspectionCalendarDayRecord> _inspectionCalendarRecords = {};
+  InspectionShiftScheduleConfig _inspectionShiftScheduleConfig =
+      InspectionShiftScheduleConfig.fallback();
+  int _cameraAttachDelayMs = 320;
   int _gridColumns = 3;
   double _mergedContentMaxHeight = 110;
   bool _showMergedLayoutDebug = false;
@@ -518,67 +1227,267 @@ class _HomePageState extends State<HomePage> {
   List<_MergedGridRow> _mergedRows = [];
   List<String> _sortedTypes = [];
   List<String> _floorLabels = ['全部'];
+  int _floorFilterPulse = 0;
+  int _roomRevealPulse = 0;
   int _pendingCount = 0;
   int _completedCount = 0;
+  int _pendingRawMaterialCount = 0;
+  bool _isExportingZip = false;
+  ModalRoute<dynamic>? _route;
+  final RawCaptureMaterialRepository _rawCaptureRepository =
+      RawCaptureMaterialRepository.instance;
+  Future<String>? _captureWeatherWarmupFuture;
+  bool _didTriggerLaunchWeatherWarmup = false;
+  bool _didFinishSessionWeatherWarmup = false;
+  bool _lastCaptureWeatherRefreshHadPosition = false;
+  String _lastWeatherRefreshSlotKey = '';
+  Timer? _weatherSlotRefreshTicker;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadData();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      unawaited(maybeAutoCheckCloudAppUpdateOnLaunch(context));
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route != null && route != _route) {
+      if (_route != null) {
+        appRouteObserver.unsubscribe(this);
+      }
+      _route = route;
+      appRouteObserver.subscribe(this, route);
+    }
   }
 
   @override
   void dispose() {
+    if (_route != null) {
+      appRouteObserver.unsubscribe(this);
+    }
+    WidgetsBinding.instance.removeObserver(this);
+    _weatherSlotRefreshTicker?.cancel();
     _searchCtrl.dispose();
     super.dispose();
   }
 
+  @override
+  void didPopNext() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _floorFilterPulse++;
+      _roomRevealPulse++;
+    });
+    unawaited(_ensureCaptureWeatherWarmup());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_ensureCaptureWeatherWarmup());
+    }
+  }
+
   Future<void> _loadData() async {
     final prefs = await SharedPreferences.getInstance();
-    _saveFolderName = prefs.getString(_prefFolderKey) ?? 'PhotoNamer';
+    final bundledCloudData = await _loadBundledCloudData();
+    final bundledPreferences = _stringKeyedMap(
+      bundledCloudData?['appPreferences'],
+    );
+    final bundledWatermarkTemplate = _stringKeyedMap(
+      bundledCloudData?['watermarkTemplate'],
+    );
+    final bundledInspectionItems = _bundledInspectionDefaults(
+      bundledCloudData?['inspectionItems'],
+    );
+    final bundledMeterRooms = _stringKeyedMapList(
+      bundledCloudData?['meterRooms'],
+    );
+    final bundledOverloadTemplates = _stringKeyedMapList(
+      bundledCloudData?['overloadTemplates'],
+    );
+    var shouldPersistBundledDefaults =
+        bundledCloudData != null &&
+        (!prefs.containsKey(_prefItemsKey) ||
+            !prefs.containsKey(_prefMeterRoomsKey) ||
+            !prefs.containsKey(kPrefMeterOverloadTemplatesKey) ||
+            !prefs.containsKey(_prefFolderKey) ||
+            !prefs.containsKey(_prefStrategyKey) ||
+            !prefs.containsKey(_prefSortByKey) ||
+            !prefs.containsKey(_prefPhotoToMeterQuickJumpKey) ||
+            !prefs.containsKey(_prefMergedLayoutEnabledKey) ||
+            !prefs.containsKey(_prefMergedDeepSearchEnabledKey) ||
+            !prefs.containsKey(_prefMergedUniformHeightEnabledKey) ||
+            !prefs.containsKey(_prefMergedUltraCompactEnabledKey) ||
+            !prefs.containsKey(_prefCameraAttachDelayEnabledKey) ||
+            !prefs.containsKey(_prefCameraAttachDelayMsKey) ||
+            !prefs.containsKey(_prefDefaultWatermarkEnabledKey) ||
+            !prefs.containsKey(_prefIncomingCabinetOnlineOcrEnabledKey) ||
+            !prefs.containsKey(_prefDefaultWatermarkLocationFallbackKey) ||
+            !prefs.containsKey(_prefDefaultWatermarkImprintTextKey) ||
+            !prefs.containsKey(_prefCachedCaptureWeatherTextKey) ||
+            !prefs.containsKey(_prefGridColumnsKey) ||
+            !prefs.containsKey(_prefMergedContentMaxHeightKey) ||
+            !prefs.containsKey(_prefTypeColorThemeIdKey) ||
+            !prefs.containsKey(_prefTypeColorOverridesKey) ||
+            !prefs.containsKey(_prefRecentTypeColorsKey));
+
+    final bundledLocationFallback = _cloudStringDefault(
+      bundledPreferences,
+      'defaultWatermarkLocationFallback',
+      _cloudStringDefault(
+        bundledWatermarkTemplate,
+        'defaultLocationFallback',
+        '',
+      ),
+    );
+    final bundledImprintText = _cloudStringDefault(
+      bundledPreferences,
+      'defaultWatermarkImprintText',
+      _cloudStringDefault(
+        bundledWatermarkTemplate,
+        'defaultImprintText',
+        WatermarkTemplate118Composer.defaultImprintText,
+      ),
+    );
+    final bundledWeatherText = _cloudStringDefault(
+      bundledWatermarkTemplate,
+      'defaultWeatherText',
+      WatermarkTemplate118Composer.defaultWeatherText,
+    );
+
+    _saveFolderName =
+        prefs.getString(_prefFolderKey) ??
+        _cloudStringDefault(bundledPreferences, 'saveFolderName', 'PhotoNamer');
     _saveDirectoryPath = prefs.getString(_prefSaveDirKey);
-    final strategyStr = prefs.getString(_prefStrategyKey) ?? 'increment';
+    _directCaptureSaveDirectoryPath = prefs.getString(
+      _prefDirectCaptureSaveDirKey,
+    );
+    final strategyStr =
+        prefs.getString(_prefStrategyKey) ??
+        _cloudStringDefault(
+          bundledPreferences,
+          'conflictStrategy',
+          'increment',
+        );
     _strategy = strategyStr == 'overwrite'
         ? ConflictStrategy.overwrite
         : ConflictStrategy.increment;
-    _sortBy = prefs.getString(_prefSortByKey) ?? 'serial';
+    _sortBy =
+        prefs.getString(_prefSortByKey) ??
+        _cloudStringDefault(bundledPreferences, 'sortBy', 'serial');
     _photoToMeterQuickJumpEnabled =
-        prefs.getBool(_prefPhotoToMeterQuickJumpKey) ?? true;
-    _mergedLayoutEnabled = prefs.getBool(_prefMergedLayoutEnabledKey) ?? true;
+        prefs.getBool(_prefPhotoToMeterQuickJumpKey) ??
+        _cloudBoolDefault(
+          bundledPreferences,
+          'photoToMeterQuickJumpEnabled',
+          true,
+        );
+    _mergedLayoutEnabled =
+        prefs.getBool(_prefMergedLayoutEnabledKey) ??
+        _cloudBoolDefault(bundledPreferences, 'mergedLayoutEnabled', true);
     _mergedDeepSearchEnabled =
-        prefs.getBool(_prefMergedDeepSearchEnabledKey) ?? true;
+        prefs.getBool(_prefMergedDeepSearchEnabledKey) ??
+        _cloudBoolDefault(bundledPreferences, 'mergedDeepSearchEnabled', true);
     _mergedUniformHeightEnabled =
-        prefs.getBool(_prefMergedUniformHeightEnabledKey) ?? false;
+        prefs.getBool(_prefMergedUniformHeightEnabledKey) ??
+        _cloudBoolDefault(
+          bundledPreferences,
+          'mergedUniformHeightEnabled',
+          false,
+        );
     _mergedUltraCompactEnabled =
-        prefs.getBool(_prefMergedUltraCompactEnabledKey) ?? false;
+        prefs.getBool(_prefMergedUltraCompactEnabledKey) ??
+        _cloudBoolDefault(
+          bundledPreferences,
+          'mergedUltraCompactEnabled',
+          false,
+        );
+    _cameraAttachDelayEnabled =
+        prefs.getBool(_prefCameraAttachDelayEnabledKey) ??
+        _cloudBoolDefault(bundledPreferences, 'cameraAttachDelayEnabled', true);
+    _defaultWatermarkEnabled =
+        prefs.getBool(_prefDefaultWatermarkEnabledKey) ??
+        _cloudBoolDefault(bundledPreferences, 'defaultWatermarkEnabled', true);
+    _incomingCabinetOnlineOcrEnabled =
+        prefs.getBool(_prefIncomingCabinetOnlineOcrEnabledKey) ??
+        _cloudBoolDefault(
+          bundledPreferences,
+          'incomingCabinetOnlineOcrEnabled',
+          false,
+        );
+    _defaultWatermarkLocationFallback =
+        prefs.getString(_prefDefaultWatermarkLocationFallbackKey) ??
+        bundledLocationFallback;
+    _defaultWatermarkImprintText =
+        prefs.getString(_prefDefaultWatermarkImprintTextKey) ??
+        bundledImprintText;
+    _cachedCaptureWeatherText =
+        prefs.getString(_prefCachedCaptureWeatherTextKey) ?? bundledWeatherText;
+    _lastWeatherRefreshSlotKey =
+        prefs.getString(_prefLastWeatherRefreshSlotKey) ?? '';
+    _cameraAttachDelayMs =
+        (prefs.getInt(_prefCameraAttachDelayMsKey) ??
+                _cloudIntDefault(
+                  bundledPreferences,
+                  'cameraAttachDelayMs',
+                  320,
+                ))
+            .clamp(0, 1000);
     _typeColorThemeId =
-        prefs.getString(_prefTypeColorThemeIdKey) ?? 'inspection_semantic';
+        prefs.getString(_prefTypeColorThemeIdKey) ??
+        _cloudStringDefault(
+          bundledPreferences,
+          'typeColorThemeId',
+          'inspection_semantic',
+        );
     if (!_typeColorThemes.any((e) => e.id == _typeColorThemeId)) {
       _typeColorThemeId = _typeColorThemes.first.id;
     }
-    final savedColumns = prefs.getInt(_prefGridColumnsKey) ?? 3;
+    final savedColumns =
+        prefs.getInt(_prefGridColumnsKey) ??
+        _cloudIntDefault(bundledPreferences, 'gridColumns', 3);
     _gridColumns = savedColumns.clamp(3, 6);
     final colorJson = prefs.getString(_prefTypeColorOverridesKey);
     if (colorJson != null && colorJson.isNotEmpty) {
       final decoded = jsonDecode(colorJson);
-      if (decoded is Map<String, dynamic>) {
-        _typeColorOverrides = decoded.map(
-          (k, v) => MapEntry(k, (v as num).toInt()),
-        );
+      if (decoded is Map) {
+        _typeColorOverrides = _intMapFromJson(decoded);
       }
+    } else if (colorJson == null) {
+      _typeColorOverrides = _intMapFromJson(
+        bundledPreferences['typeColorOverrides'],
+      );
     }
     final recentColorsJson = prefs.getString(_prefRecentTypeColorsKey);
     if (recentColorsJson != null && recentColorsJson.isNotEmpty) {
       final decoded = jsonDecode(recentColorsJson);
       if (decoded is List) {
-        _recentTypeColors = decoded
-            .whereType<num>()
-            .map((e) => e.toInt())
-            .toList();
+        _recentTypeColors = _intListFromJson(decoded);
       }
+    } else if (recentColorsJson == null) {
+      _recentTypeColors = _intListFromJson(
+        bundledPreferences['recentTypeColors'],
+      );
     }
     _mergedContentMaxHeight =
-        (prefs.getDouble(_prefMergedContentMaxHeightKey) ?? 110)
+        (prefs.getDouble(_prefMergedContentMaxHeightKey) ??
+                _cloudDoubleDefault(
+                  bundledPreferences,
+                  'mergedContentMaxHeight',
+                  110,
+                ))
             .clamp(36, 220)
             .toDouble();
 
@@ -587,14 +1496,39 @@ class _HomePageState extends State<HomePage> {
       final List<dynamic> decoded = jsonDecode(itemsJson);
       _items = decoded.map((e) => InspectionItem.fromJson(e)).toList();
     } else {
-      _items = _defaultItemsFromDataTs();
-      await _saveData();
+      _items = bundledInspectionItems.isNotEmpty
+          ? bundledInspectionItems
+                .map(InspectionItem.fromJson)
+                .toList(growable: false)
+          : _defaultItemsFromDataTs();
+      shouldPersistBundledDefaults = true;
     }
+
+    _inspectionCalendarRecords = decodeInspectionCalendarRecords(
+      prefs.getString(_prefInspectionCalendarRecordsKey),
+    );
+    _inspectionShiftScheduleConfig = decodeInspectionShiftScheduleConfig(
+      prefs.getString(_prefInspectionShiftScheduleConfigKey),
+    );
 
     final String? meterRoomsJson = prefs.getString(_prefMeterRoomsKey);
     if (meterRoomsJson != null) {
       final List<dynamic> decoded = jsonDecode(meterRoomsJson);
       _meterRooms = decoded.map((e) => MeterRoom.fromJson(e)).toList();
+    } else if (bundledMeterRooms.isNotEmpty) {
+      _meterRooms = bundledMeterRooms
+          .map(MeterRoom.fromJson)
+          .toList(growable: false);
+      shouldPersistBundledDefaults = true;
+    }
+
+    if (!prefs.containsKey(kPrefMeterOverloadTemplatesKey) &&
+        bundledOverloadTemplates.isNotEmpty) {
+      await prefs.setString(
+        kPrefMeterOverloadTemplatesKey,
+        jsonEncode(bundledOverloadTemplates),
+      );
+      shouldPersistBundledDefaults = true;
     }
 
     // 安装默认模板：当不存在或为空时，自动将所有“低压配电室”加入抄表模式
@@ -603,10 +1537,18 @@ class _HomePageState extends State<HomePage> {
           .where((e) => e.type == '低压配电室')
           .map(_buildMeterRoomFromInspection)
           .toList();
+      shouldPersistBundledDefaults = true;
+    }
+
+    if (shouldPersistBundledDefaults) {
       await _saveData();
     }
 
+    await _rawCaptureRepository.init();
+    await _refreshRawMaterialStats();
     _recalculateDisplayData();
+    _startWeatherSlotRefreshTicker();
+    unawaited(_warmupCaptureWeatherOnLaunch());
   }
 
   void _recalculateDisplayData() {
@@ -663,6 +1605,31 @@ class _HomePageState extends State<HomePage> {
       _sortedTypes = sortedTypes;
       _mergedRows = mergedRows;
     });
+  }
+
+  void _applyFloorFilter(String label) {
+    if (_floorFilter == label) {
+      return;
+    }
+    _floorFilter = label;
+    _floorFilterPulse++;
+    _triggerRoomReveal();
+    _recalculateDisplayData();
+  }
+
+  void _switchCurrentTab(int nextTabIndex) {
+    if (_currentTabIndex == nextTabIndex) {
+      return;
+    }
+    setState(() {
+      _currentTabIndex = nextTabIndex;
+    });
+    _triggerRoomReveal();
+    _recalculateDisplayData();
+  }
+
+  void _triggerRoomReveal() {
+    _roomRevealPulse++;
   }
 
   List<_MergedGridRow> _buildMergedRows(
@@ -1174,6 +2141,14 @@ class _HomePageState extends State<HomePage> {
     return '/storage/emulated/0/$_saveFolderName';
   }
 
+  String _currentDirectCapturePathDisplay() {
+    if (_directCaptureSaveDirectoryPath != null &&
+        _directCaptureSaveDirectoryPath!.trim().isNotEmpty) {
+      return _directCaptureSaveDirectoryPath!;
+    }
+    return '/storage/emulated/0/$_defaultDirectCaptureFolderName';
+  }
+
   String _sanitizeFileName(String name) {
     return name.replaceAll(RegExp(r'[/:*?"<>|]'), '_');
   }
@@ -1198,6 +2173,28 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _pickDirectCaptureSaveDirectory(
+    StateSetter setModalState,
+  ) async {
+    try {
+      final dir = await FilePicker.platform.getDirectoryPath(
+        dialogTitle: '选择直拍保存目录',
+      );
+      if (dir == null) return;
+      setState(() {
+        _directCaptureSaveDirectoryPath = dir;
+      });
+      setModalState(() {});
+      await _saveData();
+    } catch (e) {
+      debugPrint('Pick direct capture directory error: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('选择直拍目录失败: $e')));
+    }
+  }
+
   Future<void> _saveData() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
@@ -1209,6 +2206,14 @@ class _HomePageState extends State<HomePage> {
       await prefs.setString(_prefSaveDirKey, _saveDirectoryPath!);
     } else {
       await prefs.remove(_prefSaveDirKey);
+    }
+    if (_directCaptureSaveDirectoryPath != null) {
+      await prefs.setString(
+        _prefDirectCaptureSaveDirKey,
+        _directCaptureSaveDirectoryPath!,
+      );
+    } else {
+      await prefs.remove(_prefDirectCaptureSaveDirKey);
     }
     await prefs.setString(_prefStrategyKey, _strategy.name);
     await prefs.setString(_prefSortByKey, _sortBy);
@@ -1229,6 +2234,30 @@ class _HomePageState extends State<HomePage> {
       _prefMergedUltraCompactEnabledKey,
       _mergedUltraCompactEnabled,
     );
+    await prefs.setBool(
+      _prefCameraAttachDelayEnabledKey,
+      _cameraAttachDelayEnabled,
+    );
+    await prefs.setBool(
+      _prefDefaultWatermarkEnabledKey,
+      _defaultWatermarkEnabled,
+    );
+    await prefs.setBool(
+      _prefIncomingCabinetOnlineOcrEnabledKey,
+      _incomingCabinetOnlineOcrEnabled,
+    );
+    await prefs.setString(
+      _prefDefaultWatermarkLocationFallbackKey,
+      _defaultWatermarkLocationFallback,
+    );
+    await prefs.setString(
+      _prefDefaultWatermarkImprintTextKey,
+      _defaultWatermarkImprintText,
+    );
+    await prefs.setInt(
+      _prefCameraAttachDelayMsKey,
+      _cameraAttachDelayMs.clamp(0, 1000),
+    );
     await prefs.setInt(_prefGridColumnsKey, _gridColumns.clamp(3, 6));
     await prefs.setDouble(
       _prefMergedContentMaxHeightKey,
@@ -1247,6 +2276,669 @@ class _HomePageState extends State<HomePage> {
       _prefMeterRoomsKey,
       jsonEncode(_meterRooms.map((e) => e.toJson()).toList()),
     );
+    await prefs.setString(
+      _prefInspectionCalendarRecordsKey,
+      encodeInspectionCalendarRecords(_inspectionCalendarRecords),
+    );
+    await prefs.setString(
+      _prefInspectionShiftScheduleConfigKey,
+      encodeInspectionShiftScheduleConfig(_inspectionShiftScheduleConfig),
+    );
+  }
+
+  Future<List<Map<String, dynamic>>>
+  _loadEffectiveOverloadTemplateEntries() async {
+    final prefs = await SharedPreferences.getInstance();
+    final stored = prefs.getString(kPrefMeterOverloadTemplatesKey);
+    if (stored != null && stored.trim().isNotEmpty) {
+      final decoded = jsonDecode(stored);
+      if (decoded is List) {
+        return decoded
+            .whereType<Map>()
+            .map(
+              (entry) => Map<String, dynamic>.from(
+                entry.map((key, value) => MapEntry(key.toString(), value)),
+              ),
+            )
+            .toList();
+      }
+    }
+
+    final entries = <Map<String, dynamic>>[];
+    for (final slot in kDefaultMeterTimeSlots) {
+      final text = await rootBundle.loadString(slot.assetPath);
+      final decoded = jsonDecode(text);
+      if (decoded is! Map<String, dynamic>) {
+        continue;
+      }
+      entries.add(<String, dynamic>{
+        'label': slot.label,
+        'assetPath': slot.assetPath,
+        'rawData': Map<String, dynamic>.from(decoded),
+      });
+    }
+    return entries;
+  }
+
+  Map<String, dynamic> _buildCloudSyncPreferencesPayload() {
+    return <String, dynamic>{
+      'sortBy': _sortBy,
+      'photoToMeterQuickJumpEnabled': _photoToMeterQuickJumpEnabled,
+      'mergedLayoutEnabled': _mergedLayoutEnabled,
+      'mergedDeepSearchEnabled': _mergedDeepSearchEnabled,
+      'mergedUniformHeightEnabled': _mergedUniformHeightEnabled,
+      'mergedUltraCompactEnabled': _mergedUltraCompactEnabled,
+      'cameraAttachDelayEnabled': _cameraAttachDelayEnabled,
+      'cameraAttachDelayMs': _cameraAttachDelayMs,
+      'defaultWatermarkEnabled': _defaultWatermarkEnabled,
+      'incomingCabinetOnlineOcrEnabled': _incomingCabinetOnlineOcrEnabled,
+      'defaultWatermarkLocationFallback': _defaultWatermarkLocationFallback,
+      'defaultWatermarkImprintText': _defaultWatermarkImprintText,
+      'gridColumns': _gridColumns,
+      'mergedContentMaxHeight': _mergedContentMaxHeight,
+      'typeColorThemeId': _typeColorThemeId,
+      'typeColorOverrides': _typeColorOverrides,
+      'recentTypeColors': _recentTypeColors,
+      'saveFolderName': _saveFolderName,
+      'conflictStrategy': _strategy.name,
+    };
+  }
+
+  Future<Map<String, dynamic>> _buildCloudSyncBundle() async {
+    final overloadTemplates = await _loadEffectiveOverloadTemplateEntries();
+    return <String, dynamic>{
+      'schemaVersion': 1,
+      'appId': 'photo_namer',
+      'exportedAt': DateTime.now().toIso8601String(),
+      'inspectionItems': _items.map((item) => item.toJson()).toList(),
+      'meterRooms': _meterRooms.map((room) => room.toJson()).toList(),
+      'overloadTemplates': overloadTemplates,
+      'appPreferences': _buildCloudSyncPreferencesPayload(),
+      'watermarkTemplate': <String, dynamic>{
+        'defaultWeatherText': WatermarkTemplate118Composer.defaultWeatherText,
+        'defaultLocationFallback': _defaultWatermarkLocationFallback,
+        'defaultImprintText': _defaultWatermarkImprintText,
+        'defaultAdjustments': const Watermark118Adjustments().toMap(),
+      },
+    };
+  }
+
+  Future<void> _applyCloudSyncBundle(
+    Map<String, dynamic> bundle,
+    CloudSyncApplySelection selection,
+  ) async {
+    if (selection.inspectionItems) {
+      final inspectionItemsRaw = bundle['inspectionItems'];
+      if (inspectionItemsRaw is List) {
+        _items = inspectionItemsRaw
+            .whereType<Map>()
+            .map(
+              (entry) => InspectionItem.fromJson(
+                Map<String, dynamic>.from(
+                  entry.map((key, value) => MapEntry(key.toString(), value)),
+                ),
+              ),
+            )
+            .toList();
+      }
+    }
+
+    if (selection.meterRooms) {
+      final meterRoomsRaw = bundle['meterRooms'];
+      if (meterRoomsRaw is List) {
+        _meterRooms = meterRoomsRaw
+            .whereType<Map>()
+            .map(
+              (entry) => MeterRoom.fromJson(
+                Map<String, dynamic>.from(
+                  entry.map((key, value) => MapEntry(key.toString(), value)),
+                ),
+              ),
+            )
+            .toList();
+      }
+    }
+
+    if (selection.appPreferences) {
+      final appPreferencesRaw = bundle['appPreferences'];
+      if (appPreferencesRaw is Map) {
+        final prefsMap = Map<String, dynamic>.from(
+          appPreferencesRaw.map(
+            (key, value) => MapEntry(key.toString(), value),
+          ),
+        );
+        final sortBy = prefsMap['sortBy'];
+        if (sortBy is String && sortBy.trim().isNotEmpty) {
+          _sortBy = sortBy;
+        }
+        final saveFolderName = prefsMap['saveFolderName'];
+        if (saveFolderName is String && saveFolderName.trim().isNotEmpty) {
+          _saveFolderName = saveFolderName.trim();
+        }
+        final conflictStrategy = prefsMap['conflictStrategy'];
+        if (conflictStrategy is String && conflictStrategy == 'overwrite') {
+          _strategy = ConflictStrategy.overwrite;
+        } else if (conflictStrategy is String &&
+            conflictStrategy == 'increment') {
+          _strategy = ConflictStrategy.increment;
+        }
+
+        void readBool(String key, void Function(bool value) apply) {
+          final raw = prefsMap[key];
+          if (raw is bool) {
+            apply(raw);
+          }
+        }
+
+        void readInt(String key, void Function(int value) apply) {
+          final raw = prefsMap[key];
+          if (raw is num) {
+            apply(raw.toInt());
+          }
+        }
+
+        void readDouble(String key, void Function(double value) apply) {
+          final raw = prefsMap[key];
+          if (raw is num) {
+            apply(raw.toDouble());
+          }
+        }
+
+        readBool(
+          'photoToMeterQuickJumpEnabled',
+          (value) => _photoToMeterQuickJumpEnabled = value,
+        );
+        readBool(
+          'mergedLayoutEnabled',
+          (value) => _mergedLayoutEnabled = value,
+        );
+        readBool(
+          'mergedDeepSearchEnabled',
+          (value) => _mergedDeepSearchEnabled = value,
+        );
+        readBool(
+          'mergedUniformHeightEnabled',
+          (value) => _mergedUniformHeightEnabled = value,
+        );
+        readBool(
+          'mergedUltraCompactEnabled',
+          (value) => _mergedUltraCompactEnabled = value,
+        );
+        readBool(
+          'cameraAttachDelayEnabled',
+          (value) => _cameraAttachDelayEnabled = value,
+        );
+        readBool(
+          'defaultWatermarkEnabled',
+          (value) => _defaultWatermarkEnabled = value,
+        );
+        readBool(
+          'incomingCabinetOnlineOcrEnabled',
+          (value) => _incomingCabinetOnlineOcrEnabled = value,
+        );
+        readInt(
+          'cameraAttachDelayMs',
+          (value) => _cameraAttachDelayMs = value.clamp(0, 1000),
+        );
+        readInt('gridColumns', (value) => _gridColumns = value.clamp(3, 6));
+        readDouble(
+          'mergedContentMaxHeight',
+          (value) => _mergedContentMaxHeight = value.clamp(36, 220).toDouble(),
+        );
+
+        final typeColorThemeId = prefsMap['typeColorThemeId'];
+        if (typeColorThemeId is String &&
+            _typeColorThemes.any((theme) => theme.id == typeColorThemeId)) {
+          _typeColorThemeId = typeColorThemeId;
+        }
+
+        final typeColorOverrides = prefsMap['typeColorOverrides'];
+        if (typeColorOverrides is Map) {
+          _typeColorOverrides = typeColorOverrides.map(
+            (key, value) => MapEntry(key.toString(), (value as num).toInt()),
+          );
+        }
+
+        final recentTypeColors = prefsMap['recentTypeColors'];
+        if (recentTypeColors is List) {
+          _recentTypeColors = recentTypeColors
+              .whereType<num>()
+              .map((value) => value.toInt())
+              .toList();
+        }
+      }
+    }
+
+    if (selection.watermarkTemplate) {
+      final watermarkTemplateRaw = bundle['watermarkTemplate'];
+      if (watermarkTemplateRaw is Map) {
+        final watermarkTemplate = Map<String, dynamic>.from(
+          watermarkTemplateRaw.map(
+            (key, value) => MapEntry(key.toString(), value),
+          ),
+        );
+        final rawLocationFallback =
+            watermarkTemplate['defaultLocationFallback'];
+        if (rawLocationFallback is String) {
+          _defaultWatermarkLocationFallback = rawLocationFallback;
+        }
+        final rawImprintText = watermarkTemplate['defaultImprintText'];
+        if (rawImprintText is String) {
+          _defaultWatermarkImprintText = rawImprintText;
+        }
+      }
+    }
+
+    if (selection.overloadTemplates) {
+      final prefs = await SharedPreferences.getInstance();
+      final overloadTemplatesRaw = bundle['overloadTemplates'];
+      if (overloadTemplatesRaw is List) {
+        final normalized = overloadTemplatesRaw
+            .whereType<Map>()
+            .map(
+              (entry) => Map<String, dynamic>.from(
+                entry.map((key, value) => MapEntry(key.toString(), value)),
+              ),
+            )
+            .toList();
+        await prefs.setString(
+          kPrefMeterOverloadTemplatesKey,
+          jsonEncode(normalized),
+        );
+      }
+    }
+
+    await _saveData();
+    await _refreshRawMaterialStats();
+    _recalculateDisplayData();
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  Future<void> _openCloudSyncPage() async {
+    await Navigator.push<void>(
+      context,
+      buildAppRoute(
+        page: CloudSyncPage(
+          buildLocalBundle: _buildCloudSyncBundle,
+          applyRemoteBundle: _applyCloudSyncBundle,
+        ),
+      ),
+    );
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+  }
+
+  Future<void> _openInspectionCalendarPage() async {
+    await Navigator.push<void>(
+      context,
+      buildAppRoute(
+        page: ShiftAwareInspectionCalendarPage(
+          initialRecords: _inspectionCalendarRecords,
+          initialScheduleConfig: _inspectionShiftScheduleConfig,
+          onRecordsChanged: _updateInspectionCalendarRecords,
+          onScheduleConfigChanged: _updateInspectionShiftScheduleConfig,
+        ),
+      ),
+    );
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+  }
+
+  String _formatCaptureFileStamp(DateTime value) {
+    final local = value.toLocal();
+    final month = local.month.toString().padLeft(2, '0');
+    final day = local.day.toString().padLeft(2, '0');
+    final hour = local.hour.toString().padLeft(2, '0');
+    final minute = local.minute.toString().padLeft(2, '0');
+    final second = local.second.toString().padLeft(2, '0');
+    return '${local.year}$month${day}_$hour$minute$second';
+  }
+
+  String _buildDirectCaptureFileName(
+    String remark,
+    DateTime captureTime,
+    int index,
+  ) {
+    final normalizedRemark = _sanitizeFileName(
+      remark.trim().replaceAll(RegExp(r'\s+'), '_'),
+    );
+    final prefix = normalizedRemark.isEmpty
+        ? 'direct_capture'
+        : normalizedRemark;
+    final safePrefix = prefix.length > 24 ? prefix.substring(0, 24) : prefix;
+    final sequence = (index + 1).toString().padLeft(2, '0');
+    return '${safePrefix}_${_formatCaptureFileStamp(captureTime)}_$sequence.jpg';
+  }
+
+  Future<String> _saveDirectCaptureImmediately(
+    CameraCaptureResult capture,
+    int captureIndex,
+  ) async {
+    final saveDir = await _resolveDirectCaptureDirectory();
+    final fileName = _buildDirectCaptureFileName(
+      capture.watermarkData.roomCode,
+      capture.watermarkData.captureTime,
+      captureIndex,
+    );
+    return capture.watermarkEnabled
+        ? _saveImageToDirectory(
+            photo: capture.photo,
+            fileName: fileName,
+            watermarkData: capture.watermarkData,
+            skipCompose: capture.skipCompose,
+            preferNativeCompose: capture.preferNativeCompose,
+            saveDir: saveDir,
+          )
+        : _copyPhotoToDirectory(
+            photo: capture.photo,
+            fileName: fileName,
+            saveDir: saveDir,
+          );
+  }
+
+  Future<void> _openDirectCaptureMode() async {
+    if (widget.cameras.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('未检测到相机')));
+      return;
+    }
+
+    if (!(await _ensurePermissions())) {
+      return;
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    final initialWeatherText = await _prepareInitialCaptureWeatherText();
+    if (!mounted) {
+      return;
+    }
+
+    final captures = await Navigator.push<List<CameraCaptureResult>?>(
+      context,
+      buildAppRoute(
+        page: CameraPage(
+          camera: widget.cameras.first,
+          title: '直拍',
+          captureCount: 1,
+          allowContinuousCapture: true,
+          roomCode: '',
+          initialWatermarkLocation: _defaultWatermarkLocationFallback.trim(),
+          weatherText: initialWeatherText,
+          imprintText: _resolvedDefaultWatermarkImprintText(),
+          enableCameraAttachDelay: _cameraAttachDelayEnabled,
+          cameraAttachDelayMs: _cameraAttachDelayMs,
+          initialWatermarkEnabled: _defaultWatermarkEnabled,
+          onWatermarkPreferenceChanged: _setDefaultWatermarkEnabled,
+          onCaptureProcessed: (capture, captureIndex) async {
+            final savedPath = await _saveDirectCaptureImmediately(
+              capture,
+              captureIndex,
+            );
+            if (savedPath.isEmpty) {
+              throw StateError('直拍照片保存失败');
+            }
+          },
+        ),
+      ),
+    );
+
+    if (captures == null || captures.isEmpty || !mounted) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+
+    final pathHint = _currentDirectCapturePathDisplay();
+    final summary = '直拍本次已保存 ${captures.length} 张照片\n目录：$pathHint';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(summary), duration: const Duration(seconds: 4)),
+    );
+  }
+
+  Future<void> _updateInspectionCalendarRecords(
+    Map<String, InspectionCalendarDayRecord> records,
+  ) async {
+    final normalized = cloneInspectionCalendarRecords(records);
+    if (mounted) {
+      setState(() {
+        _inspectionCalendarRecords = normalized;
+      });
+    } else {
+      _inspectionCalendarRecords = normalized;
+    }
+    await _saveData();
+  }
+
+  Future<void> _updateInspectionShiftScheduleConfig(
+    InspectionShiftScheduleConfig config,
+  ) async {
+    if (mounted) {
+      setState(() {
+        _inspectionShiftScheduleConfig = config;
+      });
+    } else {
+      _inspectionShiftScheduleConfig = config;
+    }
+    await _saveData();
+  }
+
+  bool _recordInspectionActivityAt(DateTime moment) {
+    final slotLabel = matchedInspectionSlotLabelForMoment(
+      moment,
+      _inspectionShiftScheduleConfig,
+    );
+    if (slotLabel.isEmpty) {
+      return false;
+    }
+
+    final dateKey = formatInspectionCalendarDateKey(moment);
+    final nextSlots = Set<String>.from(
+      _inspectionCalendarRecords[dateKey]?.completedSlots ?? const <String>{},
+    );
+    if (!nextSlots.add(slotLabel)) {
+      return false;
+    }
+
+    _inspectionCalendarRecords = <String, InspectionCalendarDayRecord>{
+      ..._inspectionCalendarRecords,
+      dateKey: InspectionCalendarDayRecord(
+        dateKey: dateKey,
+        completedSlots: nextSlots,
+        updatedAt: moment.toIso8601String(),
+      ),
+    };
+    return true;
+  }
+
+  Future<void> _recordInspectionActivityAndSave(DateTime moment) async {
+    final changed = _recordInspectionActivityAt(moment);
+    if (!changed) {
+      return;
+    }
+    if (mounted) {
+      setState(() {});
+    }
+    await _saveData();
+  }
+
+  Future<void> _setDefaultWatermarkEnabled(bool value) async {
+    if (_defaultWatermarkEnabled != value && mounted) {
+      setState(() {
+        _defaultWatermarkEnabled = value;
+      });
+    } else {
+      _defaultWatermarkEnabled = value;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_prefDefaultWatermarkEnabledKey, value);
+  }
+
+  String _resolvedDefaultWatermarkLocation(InspectionItem item) {
+    final override = _defaultWatermarkLocationFallback.trim();
+    if (override.isNotEmpty) {
+      return override;
+    }
+    return item.location;
+  }
+
+  String _resolvedDefaultWatermarkImprintText() {
+    final value = _defaultWatermarkImprintText.trim();
+    if (value.isNotEmpty) {
+      return value;
+    }
+    return WatermarkTemplate118Composer.defaultImprintText;
+  }
+
+  String _resolvedInitialWeatherText() {
+    final value = _cachedCaptureWeatherText.trim();
+    if (value.isNotEmpty) {
+      return value;
+    }
+    return WatermarkTemplate118Composer.defaultWeatherText;
+  }
+
+  Future<void> _persistCachedCaptureWeatherText(String value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefCachedCaptureWeatherTextKey, value);
+  }
+
+  Future<void> _persistLastWeatherRefreshSlotKey(String value) async {
+    _lastWeatherRefreshSlotKey = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefLastWeatherRefreshSlotKey, value);
+  }
+
+  String _currentWeatherRefreshSlotKey([DateTime? moment]) {
+    return captureWeatherRefreshSlotKey(moment ?? DateTime.now());
+  }
+
+  void _startWeatherSlotRefreshTicker() {
+    _weatherSlotRefreshTicker?.cancel();
+    _weatherSlotRefreshTicker = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => unawaited(_ensureCaptureWeatherWarmup()),
+    );
+  }
+
+  Future<String> _refreshCachedCaptureWeatherText() async {
+    final fallbackWeatherText = _resolvedInitialWeatherText();
+    final snapshot = await CaptureLocationService.resolveSnapshot(
+      fallbackAddress: _defaultWatermarkLocationFallback.trim(),
+    );
+    _lastCaptureWeatherRefreshHadPosition = snapshot.position != null;
+    final weatherText = await CaptureWeatherService.resolveCurrentWeather(
+      fallbackWeatherText: fallbackWeatherText,
+      position: snapshot.position,
+    );
+    final normalized = weatherText.trim().isNotEmpty
+        ? weatherText.trim()
+        : fallbackWeatherText;
+
+    if (_cachedCaptureWeatherText != normalized) {
+      if (mounted) {
+        setState(() {
+          _cachedCaptureWeatherText = normalized;
+        });
+      } else {
+        _cachedCaptureWeatherText = normalized;
+      }
+    }
+    await _persistCachedCaptureWeatherText(normalized);
+    return normalized;
+  }
+
+  Future<String> _ensureCaptureWeatherWarmup({bool force = false}) {
+    final slotKey = _currentWeatherRefreshSlotKey();
+    if (!force &&
+        _didFinishSessionWeatherWarmup &&
+        slotKey.isNotEmpty &&
+        _lastWeatherRefreshSlotKey == slotKey) {
+      return Future<String>.value(_resolvedInitialWeatherText());
+    }
+
+    if (!_defaultWatermarkEnabled) {
+      return Future<String>.value(
+        WatermarkTemplate118Composer.defaultWeatherText,
+      );
+    }
+
+    final existing = _captureWeatherWarmupFuture;
+    if (existing != null) {
+      return existing;
+    }
+
+    final future = () async {
+      final status = await Permission.location.status;
+      if (!status.isGranted) {
+        return _resolvedInitialWeatherText();
+      }
+      final refreshed = await _refreshCachedCaptureWeatherText();
+      if (slotKey.isNotEmpty && _lastCaptureWeatherRefreshHadPosition) {
+        await _persistLastWeatherRefreshSlotKey(slotKey);
+      }
+      return refreshed;
+    }();
+    _captureWeatherWarmupFuture = future;
+    future.whenComplete(() {
+      _didFinishSessionWeatherWarmup = true;
+      if (identical(_captureWeatherWarmupFuture, future)) {
+        _captureWeatherWarmupFuture = null;
+      }
+    });
+    return future;
+  }
+
+  Future<void> _warmupCaptureWeatherOnLaunch() async {
+    if (_didTriggerLaunchWeatherWarmup || !_defaultWatermarkEnabled) {
+      return;
+    }
+    _didTriggerLaunchWeatherWarmup = true;
+
+    try {
+      await _ensureCaptureWeatherWarmup();
+    } catch (error) {
+      debugPrint('launch weather warmup skipped: $error');
+    }
+  }
+
+  Future<String> _prepareInitialCaptureWeatherText() async {
+    if (!_defaultWatermarkEnabled) {
+      return WatermarkTemplate118Composer.defaultWeatherText;
+    }
+
+    final fallback = _resolvedInitialWeatherText();
+    try {
+      return await _ensureCaptureWeatherWarmup().timeout(
+        const Duration(seconds: 4),
+        onTimeout: () => fallback,
+      );
+    } catch (error) {
+      debugPrint('prepare initial capture weather failed: $error');
+      return _resolvedInitialWeatherText();
+    }
+  }
+
+  Future<void> _refreshRawMaterialStats() async {
+    final pendingCount = await _rawCaptureRepository.countPendingMaterials();
+    if (!mounted) {
+      _pendingRawMaterialCount = pendingCount;
+      return;
+    }
+    setState(() {
+      _pendingRawMaterialCount = pendingCount;
+    });
   }
 
   Future<void> _resetAllProgress() async {
@@ -1273,13 +2965,29 @@ class _HomePageState extends State<HomePage> {
       it.isCompleted = false;
       it.photoPaths = [];
     }
+    await _rawCaptureRepository.deleteAllMaterials();
     await _saveData();
+    await _refreshRawMaterialStats();
     _recalculateDisplayData();
   }
 
   Future<int> _deleteItemPhotoFiles(InspectionItem item) async {
+    final paths = <String>{...item.photoPaths};
+    final rawMaterials = await _rawCaptureRepository.fetchMaterialsForItem(
+      item.id,
+    );
+    for (final material in rawMaterials) {
+      if (material.rawPhotoPath.trim().isNotEmpty) {
+        paths.add(material.rawPhotoPath);
+      }
+      final composedPath = material.composedPhotoPath?.trim() ?? '';
+      if (composedPath.isNotEmpty) {
+        paths.add(composedPath);
+      }
+    }
+
     int removedFileCount = 0;
-    for (final p in item.photoPaths) {
+    for (final p in paths) {
       final file = File(p);
       if (await file.exists()) {
         try {
@@ -1288,6 +2996,7 @@ class _HomePageState extends State<HomePage> {
         } catch (_) {}
       }
     }
+    await _rawCaptureRepository.deleteMaterialsForItem(item.id);
     return removedFileCount;
   }
 
@@ -1321,6 +3030,7 @@ class _HomePageState extends State<HomePage> {
     item.isCompleted = false;
 
     await _saveData();
+    await _refreshRawMaterialStats();
     _recalculateDisplayData();
 
     if (!mounted) return;
@@ -1358,6 +3068,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     await _saveData();
+    await _refreshRawMaterialStats();
     _recalculateDisplayData();
 
     if (!mounted) return;
@@ -1406,10 +3117,12 @@ class _HomePageState extends State<HomePage> {
     final result = await Navigator.push<bool>(
       context,
       buildAppRoute(
-        MeterRoomsPage(
+        page: MeterRoomsPage(
           allInspectionItems: _items,
           meterRooms: _meterRooms,
           cameras: widget.cameras,
+          defaultIncomingCabinetOnlineOcrEnabled:
+              _incomingCabinetOnlineOcrEnabled,
           onSave: (rooms) async {
             _meterRooms = rooms;
             await _saveData();
@@ -1432,9 +3145,11 @@ class _HomePageState extends State<HomePage> {
     await Navigator.push(
       context,
       buildAppRoute(
-        MeterDetailPage(
+        page: MeterDetailPage(
           room: room,
           cameras: widget.cameras,
+          defaultIncomingCabinetOnlineOcrEnabled:
+              _incomingCabinetOnlineOcrEnabled,
           onChanged: () async {
             await _saveData();
             if (mounted) setState(() {});
@@ -1890,59 +3605,138 @@ class _HomePageState extends State<HomePage> {
     ];
   }
 
+  List<String> _collectCompletedPhotoPaths() {
+    final uniquePaths = <String>{};
+    for (final item in _items) {
+      if (!item.isCompleted) {
+        continue;
+      }
+      for (final photoPath in item.photoPaths) {
+        final normalized = photoPath.trim();
+        if (normalized.isNotEmpty) {
+          uniquePaths.add(normalized);
+        }
+      }
+    }
+    return uniquePaths.toList(growable: false);
+  }
+
+  Widget _buildZipExportProgressDialog(
+    ValueListenable<String> messageListenable,
+  ) {
+    return PopScope(
+      canPop: false,
+      child: AlertDialog(
+        content: Row(
+          children: [
+            const SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(strokeWidth: 2.6),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: ValueListenableBuilder<String>(
+                valueListenable: messageListenable,
+                builder: (context, message, _) {
+                  return Text(message);
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Future<void> _exportZip() async {
-    if (_items.every((e) => !e.isCompleted)) {
+    if (_isExportingZip) {
+      return;
+    }
+
+    final photoPaths = _collectCompletedPhotoPaths();
+    if (photoPaths.isEmpty) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('当前没有已拍的照片可以打包')));
       return;
     }
 
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => const Center(child: CircularProgressIndicator()),
+    final rootNavigator = Navigator.of(context, rootNavigator: true);
+    final messenger = ScaffoldMessenger.of(context);
+    final progressMessage = ValueNotifier<String>(
+      '正在整理 ${photoPaths.length} 张照片...',
     );
+    var showedProgressDialog = false;
+
+    if (mounted) {
+      setState(() {
+        _isExportingZip = true;
+      });
+      showedProgressDialog = true;
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _buildZipExportProgressDialog(progressMessage),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 32));
+    } else {
+      _isExportingZip = true;
+    }
 
     try {
-      final encoder = ZipFileEncoder();
       final String timestamp = DateTime.now().millisecondsSinceEpoch.toString();
       final Directory tempDir = await getTemporaryDirectory();
       final String zipPath = path.join(tempDir.path, '巡检照片_$timestamp.zip');
+      progressMessage.value = '正在后台压缩，请稍候...';
 
-      encoder.create(zipPath);
-
-      int addedCount = 0;
-      for (var item in _items) {
-        if (item.isCompleted) {
-          for (var p in item.photoPaths) {
-            final file = File(p);
-            if (file.existsSync()) {
-              encoder.addFile(file);
-              addedCount++;
-            }
-          }
-        }
-      }
-
-      encoder.close();
-      if (!mounted) return;
-      Navigator.pop(context); // Close loading
-
-      if (addedCount == 0) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('未找到有效的照片文件')));
+      final result = await compute(
+        _createInspectionZipInBackground,
+        <String, dynamic>{'photoPaths': photoPaths, 'zipPath': zipPath},
+      );
+      final addedCount = (result['addedCount'] as num?)?.toInt() ?? 0;
+      if (!mounted) {
         return;
       }
 
+      if (addedCount == 0) {
+        if (showedProgressDialog) {
+          rootNavigator.pop();
+          showedProgressDialog = false;
+        }
+        messenger.showSnackBar(const SnackBar(content: Text('未找到有效的照片文件')));
+        return;
+      }
+
+      await _recordInspectionActivityAndSave(DateTime.now());
+      progressMessage.value = '压缩完成，正在拉起分享...';
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      if (showedProgressDialog) {
+        rootNavigator.pop();
+        showedProgressDialog = false;
+      }
       await Share.shareXFiles([XFile(zipPath)], text: '巡检照片导出');
     } catch (e) {
-      if (!mounted) return;
-      Navigator.pop(context);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('打包失败: $e')));
+      if (!mounted) {
+        return;
+      }
+      if (showedProgressDialog) {
+        rootNavigator.pop();
+        showedProgressDialog = false;
+      }
+      messenger.showSnackBar(SnackBar(content: Text('打包失败: $e')));
+    } finally {
+      if (showedProgressDialog && rootNavigator.mounted) {
+        rootNavigator.pop();
+      }
+      progressMessage.dispose();
+      if (mounted) {
+        setState(() {
+          _isExportingZip = false;
+        });
+      } else {
+        _isExportingZip = false;
+      }
     }
   }
 
@@ -2051,35 +3845,587 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Future<String> _saveImage(XFile photo, String fileName) async {
+  Future<Directory> _resolveDirectory({
+    String? directoryPath,
+    required String fallbackFolderName,
+  }) async {
+    final saveDir = directoryPath != null && directoryPath.trim().isNotEmpty
+        ? Directory(directoryPath.trim())
+        : Directory(path.join('/storage/emulated/0', fallbackFolderName));
+    if (!saveDir.existsSync()) {
+      await saveDir.create(recursive: true);
+    }
+    return saveDir;
+  }
+
+  Future<Directory> _resolveSaveDirectory() async {
+    return _resolveDirectory(
+      directoryPath: _saveDirectoryPath,
+      fallbackFolderName: _saveFolderName,
+    );
+  }
+
+  Future<Directory> _resolveDirectCaptureDirectory() async {
+    return _resolveDirectory(
+      directoryPath: _directCaptureSaveDirectoryPath,
+      fallbackFolderName: _defaultDirectCaptureFolderName,
+    );
+  }
+
+  Future<Directory> _resolveRawMaterialDirectory() async {
+    final saveDir = await _resolveSaveDirectory();
+    final rawDir = Directory(path.join(saveDir.path, 'raw_materials'));
+    if (!rawDir.existsSync()) {
+      await rawDir.create(recursive: true);
+    }
+    return rawDir;
+  }
+
+  String _resolveOutputPath(Directory saveDir, String fileName) {
+    String finalPath = path.join(saveDir.path, fileName);
+    if (_strategy == ConflictStrategy.increment &&
+        File(finalPath).existsSync()) {
+      int idx = 1;
+      final base = path.basenameWithoutExtension(fileName);
+      final ext = path.extension(fileName);
+      while (File(finalPath).existsSync()) {
+        finalPath = path.join(saveDir.path, '${base}_$idx$ext');
+        idx++;
+      }
+    }
+    return finalPath;
+  }
+
+  Future<void> _deleteTempCaptureIfNeeded(
+    String sourcePath,
+    String finalPath,
+  ) async {
+    if (sourcePath == finalPath) {
+      return;
+    }
     try {
-      Directory saveDir;
-      if (_saveDirectoryPath != null && _saveDirectoryPath!.isNotEmpty) {
-        saveDir = Directory(_saveDirectoryPath!);
+      await File(sourcePath).delete();
+    } catch (_) {}
+  }
+
+  Future<String> _saveImage(
+    XFile photo,
+    String fileName,
+    Watermark118Data watermarkData,
+    bool skipCompose,
+    bool preferNativeCompose,
+  ) async {
+    final saveDir = await _resolveSaveDirectory();
+    return _saveImageToDirectory(
+      photo: photo,
+      fileName: fileName,
+      watermarkData: watermarkData,
+      skipCompose: skipCompose,
+      preferNativeCompose: preferNativeCompose,
+      saveDir: saveDir,
+    );
+  }
+
+  Future<String> _saveImageToDirectory({
+    required XFile photo,
+    required String fileName,
+    required Watermark118Data watermarkData,
+    required bool skipCompose,
+    required bool preferNativeCompose,
+    required Directory saveDir,
+  }) async {
+    try {
+      final finalPath = _resolveOutputPath(saveDir, fileName);
+
+      if (skipCompose) {
+        await File(photo.path).copy(finalPath);
+        unawaited(_deleteTempCaptureIfNeeded(photo.path, finalPath));
       } else {
-        saveDir = Directory(path.join('/storage/emulated/0', _saveFolderName));
-      }
-
-      if (!saveDir.existsSync()) await saveDir.create(recursive: true);
-
-      String finalPath = path.join(saveDir.path, fileName);
-      if (_strategy == ConflictStrategy.increment &&
-          File(finalPath).existsSync()) {
-        int idx = 1;
-        final base = path.basenameWithoutExtension(fileName);
-        final String ext = path.extension(fileName);
-        while (File(finalPath).existsSync()) {
-          finalPath = path.join(saveDir.path, '${base}_$idx$ext');
-          idx++;
+        if (preferNativeCompose && Platform.isAndroid) {
+          try {
+            await _composeSingleWatermarkImageNatively(
+              sourcePath: photo.path,
+              outputPath: finalPath,
+              watermarkData: watermarkData,
+            );
+          } catch (error) {
+            debugPrint(
+              'native single compose failed, fallback to dart: $error',
+            );
+            await WatermarkTemplate118Composer.composePhoto(
+              sourcePath: photo.path,
+              outputPath: finalPath,
+              data: watermarkData,
+            );
+          }
+        } else {
+          await WatermarkTemplate118Composer.composePhoto(
+            sourcePath: photo.path,
+            outputPath: finalPath,
+            data: watermarkData,
+          );
         }
+        unawaited(_deleteTempCaptureIfNeeded(photo.path, finalPath));
       }
-
-      await File(photo.path).copy(finalPath);
       return finalPath;
     } catch (e) {
       debugPrint('Save error: $e');
       return '';
     }
+  }
+
+  Future<void> _composeSingleWatermarkImageNatively({
+    required String sourcePath,
+    required String outputPath,
+    required Watermark118Data watermarkData,
+  }) async {
+    final result = await NativeWatermarkCameraBridge.composeWatermark118Batch(
+      entries: <Map<String, dynamic>>[
+        <String, dynamic>{
+          'materialId': null,
+          'inspectionItemId': -1,
+          'rawPhotoPath': sourcePath,
+          'outputPath': outputPath,
+          'captureTimeMillis': watermarkData.captureTime.millisecondsSinceEpoch,
+          'location': watermarkData.location,
+          'roomCode': watermarkData.roomCode,
+          'weatherText': watermarkData.weatherText,
+          'imprintText': watermarkData.imprintText,
+          'displayTimeText': watermarkData.formattedTime,
+          'displayDateText': watermarkData.formattedDate,
+          'antiFakeCode': watermarkData.antiFakeCode,
+        },
+      ],
+    );
+
+    final rawResults = result['results'];
+    if (rawResults is! List || rawResults.isEmpty || rawResults.first is! Map) {
+      throw StateError('原生单张合成返回无效结果');
+    }
+
+    final entry = Map<String, dynamic>.from(rawResults.first as Map);
+    final status = (entry['status'] as String?)?.trim() ?? '';
+    if (status != 'success') {
+      throw StateError('原生单张合成失败: $status');
+    }
+  }
+
+  Future<String> _saveRawMaterialImage(XFile photo, String fileName) async {
+    final rawDir = await _resolveRawMaterialDirectory();
+    return _copyPhotoToDirectory(
+      photo: photo,
+      fileName: fileName,
+      saveDir: rawDir,
+    );
+  }
+
+  Future<String> _copyPhotoToDirectory({
+    required XFile photo,
+    required String fileName,
+    required Directory saveDir,
+  }) async {
+    try {
+      final finalPath = _resolveOutputPath(saveDir, fileName);
+      await File(photo.path).copy(finalPath);
+      unawaited(_deleteTempCaptureIfNeeded(photo.path, finalPath));
+      return finalPath;
+    } catch (e) {
+      debugPrint('Copy capture file error: $e');
+      return '';
+    }
+  }
+
+  // 118 备注块默认文案：
+  // 优先使用“房间号 + 类型名 + 编号”的完整房间名，和你现在期望的原始命名一致。
+  // 例如：`1-1低压配电室PD01`
+  String _defaultWatermarkRoomRemark(InspectionItem item) {
+    final parts = <String>[
+      item.location.trim(),
+      item.type.trim(),
+      item.serial.trim(),
+    ].where((value) => value.isNotEmpty).toList();
+    if (parts.isNotEmpty) {
+      return parts.join();
+    }
+
+    final itemName = item.name.trim();
+    if (itemName.isNotEmpty) {
+      return itemName;
+    }
+    return item.serial.trim();
+  }
+
+  RawCaptureMaterial _buildRawCaptureMaterial({
+    required InspectionItem item,
+    required CameraCaptureResult capture,
+    required String rawPhotoPath,
+    required String preferredOutputFileName,
+  }) {
+    final watermarkData = capture.watermarkData;
+    return RawCaptureMaterial(
+      inspectionItemId: item.id,
+      itemSerial: item.serial,
+      itemName: item.name,
+      roomCode: watermarkData.roomCode,
+      preferredOutputFileName: preferredOutputFileName,
+      rawPhotoPath: rawPhotoPath,
+      captureTimeMillis: watermarkData.captureTime.millisecondsSinceEpoch,
+      location: watermarkData.location,
+      weatherText: watermarkData.weatherText,
+      imprintText: watermarkData.imprintText,
+      adjustments: watermarkData.adjustments,
+      displayTimeText: watermarkData.formattedTime,
+      displayDateText: watermarkData.formattedDate,
+      createdAtMillis: DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  Future<void> _syncItemPhotoPathsFromRawMaterials(
+    Iterable<int> itemIds,
+  ) async {
+    for (final itemId in itemIds.toSet()) {
+      final itemIndex = _items.indexWhere((item) => item.id == itemId);
+      if (itemIndex < 0) {
+        continue;
+      }
+      final displayPaths = await _rawCaptureRepository
+          .fetchDisplayPhotoPathsForItem(itemId);
+      if (displayPaths.isEmpty) {
+        continue;
+      }
+      _items[itemIndex].photoPaths = displayPaths;
+      _items[itemIndex].isCompleted = displayPaths.isNotEmpty;
+    }
+  }
+
+  Future<void> _openRawBatchCompose() async {
+    final pendingMaterials = await _rawCaptureRepository
+        .fetchPendingMaterials();
+    if (pendingMaterials.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('当前没有待合成的无水印照片')));
+      }
+      return;
+    }
+
+    final sample = pendingMaterials.first;
+    if (!mounted) {
+      return;
+    }
+
+    final options = await Navigator.push<BatchComposeOptions?>(
+      context,
+      buildAppRoute(
+        page: RawCaptureBatchPage(
+          pendingCount: pendingMaterials.length,
+          initialLocation: sample.location,
+          initialWeatherText: sample.weatherText,
+          initialRoomCode: sample.roomCode,
+          initialImprintText: sample.imprintText,
+        ),
+      ),
+    );
+    if (options == null) {
+      return;
+    }
+
+    await _composePendingRawMaterials(pendingMaterials, options);
+  }
+
+  Future<void> _composePendingRawMaterials(
+    List<RawCaptureMaterial> materials,
+    BatchComposeOptions options,
+  ) async {
+    if (materials.isEmpty) {
+      return;
+    }
+
+    var showedProgressDialog = false;
+    if (mounted) {
+      showedProgressDialog = true;
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => const PopScope(
+          canPop: false,
+          child: AlertDialog(
+            content: Row(
+              children: [
+                SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2.6),
+                ),
+                SizedBox(width: 16),
+                Expanded(child: Text('正在批量合成水印，请稍候...')),
+              ],
+            ),
+          ),
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      await WidgetsBinding.instance.endOfFrame;
+    }
+
+    int successCount = 0;
+    int missingCount = 0;
+    int failedCount = 0;
+    final syncedItemIds = <int>{};
+
+    try {
+      final result = Platform.isAndroid
+          ? await _composePendingRawMaterialsNatively(materials, options)
+          : await _composePendingRawMaterialsInFlutterFallback(
+              materials,
+              options,
+            );
+      successCount = (result['successCount'] as int?) ?? 0;
+      missingCount = (result['missingCount'] as int?) ?? 0;
+      failedCount = (result['failedCount'] as int?) ?? 0;
+      final rawSyncedItemIds = result['syncedItemIds'];
+      if (rawSyncedItemIds is Set<int>) {
+        syncedItemIds.addAll(rawSyncedItemIds);
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('批量合成失败: $error')));
+      }
+      return;
+    } finally {
+      if (showedProgressDialog && mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+    }
+
+    await _syncItemPhotoPathsFromRawMaterials(syncedItemIds);
+    await _saveData();
+    _recalculateDisplayData();
+    await _refreshRawMaterialStats();
+
+    if (!mounted) {
+      return;
+    }
+
+    final parts = <String>[];
+    if (successCount > 0) {
+      parts.add('成功 $successCount 张');
+    }
+    if (missingCount > 0) {
+      parts.add('原图缺失 $missingCount 张');
+    }
+    if (failedCount > 0) {
+      parts.add('失败 $failedCount 张');
+    }
+    if (parts.isEmpty) {
+      parts.add('没有可处理的照片');
+    }
+
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('批量合成完成：${parts.join('，')}')));
+  }
+
+  Future<Map<String, dynamic>> _composePendingRawMaterialsNatively(
+    List<RawCaptureMaterial> materials,
+    BatchComposeOptions options,
+  ) async {
+    final saveDir = await _resolveSaveDirectory();
+    final entries = _buildNativeBatchComposeEntries(
+      materials,
+      options,
+      saveDir,
+    );
+    final result = await NativeWatermarkCameraBridge.composeWatermark118Batch(
+      entries: entries,
+    );
+
+    final syncedItemIds = <int>{};
+    final rawResults = result['results'];
+    if (rawResults is List) {
+      for (final rawEntry in rawResults) {
+        if (rawEntry is! Map) {
+          continue;
+        }
+        final entry = Map<String, dynamic>.from(rawEntry);
+        final status = (entry['status'] as String?)?.trim() ?? '';
+        if (status != 'success') {
+          continue;
+        }
+
+        final materialId = (entry['materialId'] as num?)?.toInt();
+        final inspectionItemId = (entry['inspectionItemId'] as num?)?.toInt();
+        final outputPath = (entry['outputPath'] as String?)?.trim() ?? '';
+        if (materialId != null && outputPath.isNotEmpty) {
+          await _rawCaptureRepository.markMaterialComposed(
+            materialId: materialId,
+            composedPhotoPath: outputPath,
+          );
+        }
+        if (inspectionItemId != null) {
+          syncedItemIds.add(inspectionItemId);
+        }
+      }
+    }
+
+    return <String, dynamic>{
+      'successCount': _readBatchCount(result['successCount']),
+      'missingCount': _readBatchCount(result['missingCount']),
+      'failedCount': _readBatchCount(result['failedCount']),
+      'syncedItemIds': syncedItemIds,
+    };
+  }
+
+  Future<Map<String, dynamic>> _composePendingRawMaterialsInFlutterFallback(
+    List<RawCaptureMaterial> materials,
+    BatchComposeOptions options,
+  ) async {
+    final saveDir = await _resolveSaveDirectory();
+    int successCount = 0;
+    int missingCount = 0;
+    int failedCount = 0;
+    final syncedItemIds = <int>{};
+
+    for (final material in materials) {
+      final rawFile = File(material.rawPhotoPath);
+      if (!await rawFile.exists()) {
+        missingCount++;
+        continue;
+      }
+
+      final captureTime = options.useCaptureTime
+          ? DateTime.fromMillisecondsSinceEpoch(material.captureTimeMillis)
+          : options.customCaptureTime;
+      final data = Watermark118Data(
+        location: options.useStoredLocation
+            ? material.location
+            : options.customLocation,
+        roomCode: options.useStoredRoomCode
+            ? material.roomCode
+            : options.customRoomCode,
+        weatherText: options.useStoredWeatherText
+            ? material.weatherText
+            : options.customWeatherText,
+        captureTime: captureTime,
+        imprintText: options.useStoredImprintText
+            ? material.imprintText
+            : options.customImprintText,
+        antiFakeCode: WatermarkTemplate118Composer.generateAntiFakeCode(),
+        secureCodeSpacingValue: material.adjustments.secureCodeSpacingValue,
+        adjustments: material.adjustments,
+        timeOverrideText: options.useCaptureTime
+            ? material.displayTimeText
+            : null,
+        dateOverrideText: options.useCaptureTime
+            ? material.displayDateText
+            : null,
+      );
+
+      try {
+        final outputPath = _resolveOutputPath(
+          saveDir,
+          material.preferredOutputFileName,
+        );
+        await WatermarkTemplate118Composer.composePhoto(
+          sourcePath: material.rawPhotoPath,
+          outputPath: outputPath,
+          data: data,
+        );
+
+        final materialId = material.id;
+        if (materialId != null) {
+          await _rawCaptureRepository.markMaterialComposed(
+            materialId: materialId,
+            composedPhotoPath: outputPath,
+          );
+        }
+        syncedItemIds.add(material.inspectionItemId);
+        successCount++;
+      } catch (error) {
+        debugPrint('batch compose failed for ${material.rawPhotoPath}: $error');
+        failedCount++;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+
+    return <String, dynamic>{
+      'successCount': successCount,
+      'missingCount': missingCount,
+      'failedCount': failedCount,
+      'syncedItemIds': syncedItemIds,
+    };
+  }
+
+  List<Map<String, dynamic>> _buildNativeBatchComposeEntries(
+    List<RawCaptureMaterial> materials,
+    BatchComposeOptions options,
+    Directory saveDir,
+  ) {
+    final reservedPaths = <String>{};
+    return materials.map((material) {
+      final captureTime = options.useCaptureTime
+          ? DateTime.fromMillisecondsSinceEpoch(material.captureTimeMillis)
+          : options.customCaptureTime;
+      return <String, dynamic>{
+        'materialId': material.id,
+        'inspectionItemId': material.inspectionItemId,
+        'rawPhotoPath': material.rawPhotoPath,
+        'outputPath': _resolvePlannedOutputPath(
+          saveDir,
+          material.preferredOutputFileName,
+          reservedPaths,
+        ),
+        'captureTimeMillis': captureTime.millisecondsSinceEpoch,
+        'location': options.useStoredLocation
+            ? material.location
+            : options.customLocation,
+        'roomCode': options.useStoredRoomCode
+            ? material.roomCode
+            : options.customRoomCode,
+        'weatherText': options.useStoredWeatherText
+            ? material.weatherText
+            : options.customWeatherText,
+        'imprintText': options.useStoredImprintText
+            ? material.imprintText
+            : options.customImprintText,
+        'displayTimeText': options.useCaptureTime
+            ? material.displayTimeText
+            : null,
+        'displayDateText': options.useCaptureTime
+            ? material.displayDateText
+            : null,
+      };
+    }).toList();
+  }
+
+  String _resolvePlannedOutputPath(
+    Directory saveDir,
+    String fileName,
+    Set<String> reservedPaths,
+  ) {
+    String finalPath = path.join(saveDir.path, fileName);
+    if (_strategy == ConflictStrategy.increment &&
+        (File(finalPath).existsSync() || reservedPaths.contains(finalPath))) {
+      int idx = 1;
+      final base = path.basenameWithoutExtension(fileName);
+      final ext = path.extension(fileName);
+      while (File(finalPath).existsSync() ||
+          reservedPaths.contains(finalPath)) {
+        finalPath = path.join(saveDir.path, '${base}_$idx$ext');
+        idx++;
+      }
+    }
+    if (_strategy == ConflictStrategy.increment) {
+      reservedPaths.add(finalPath);
+    }
+    return finalPath;
+  }
+
+  int _readBatchCount(Object? value) {
+    return value is num ? value.toInt() : 0;
   }
 
   Future<void> _takePhoto(InspectionItem item) async {
@@ -2096,39 +4442,91 @@ class _HomePageState extends State<HomePage> {
 
     final bool isMulti = item.type == '低压配电室' || item.type == '网络传输机房';
     final int count = isMulti ? 2 : 1;
+    final watermarkRoomRemark = _defaultWatermarkRoomRemark(item);
+    final initialWeatherText = await _prepareInitialCaptureWeatherText();
 
-    final List<XFile>? photos = await Navigator.push<List<XFile>?>(
+    if (!mounted) return;
+
+    final captures = await Navigator.push<List<CameraCaptureResult>?>(
       context,
       buildAppRoute(
-        CameraPage(
+        page: CameraPage(
           camera: widget.cameras.first,
           title: item.name,
           captureCount: count,
+          roomCode: watermarkRoomRemark,
+          initialWatermarkLocation: _resolvedDefaultWatermarkLocation(item),
+          weatherText: initialWeatherText,
+          imprintText: _resolvedDefaultWatermarkImprintText(),
+          enableCameraAttachDelay: _cameraAttachDelayEnabled,
+          cameraAttachDelayMs: _cameraAttachDelayMs,
+          initialWatermarkEnabled: _defaultWatermarkEnabled,
+          onWatermarkPreferenceChanged: _setDefaultWatermarkEnabled,
         ),
       ),
     );
 
-    if (photos == null || photos.isEmpty) return;
+    if (captures == null || captures.isEmpty) return;
 
     List<String> savedPaths = [];
-    for (int i = 0; i < photos.length; i++) {
-      final photo = photos[i];
+    final rawMaterials = <RawCaptureMaterial>[];
+    for (int i = 0; i < captures.length; i++) {
+      final capture = captures[i];
       final String fileName = isMulti
           ? '${_sanitizeFileName(item.serial)}_$i.jpg'
           : '${_sanitizeFileName(item.serial)}.jpg';
 
-      final savedPath = await _saveImage(photo, fileName);
+      final savedPath = capture.watermarkEnabled
+          ? await _saveImage(
+              capture.photo,
+              fileName,
+              capture.watermarkData,
+              capture.skipCompose,
+              capture.preferNativeCompose,
+            )
+          : await _saveRawMaterialImage(capture.photo, fileName);
       if (savedPath.isNotEmpty) savedPaths.add(savedPath);
+      if (!capture.watermarkEnabled && savedPath.isNotEmpty) {
+        rawMaterials.add(
+          _buildRawCaptureMaterial(
+            item: item,
+            capture: capture,
+            rawPhotoPath: savedPath,
+            preferredOutputFileName: fileName,
+          ),
+        );
+      }
+    }
+
+    if (savedPaths.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('水印照片生成失败')));
+      }
+      return;
+    }
+
+    if (rawMaterials.isNotEmpty) {
+      await _rawCaptureRepository.insertMaterials(rawMaterials);
+      await _refreshRawMaterialStats();
     }
 
     if (savedPaths.isNotEmpty) {
       item.isCompleted = true;
       item.photoPaths = savedPaths;
+      _recordInspectionActivityAt(DateTime.now());
       await _saveData();
       _recalculateDisplayData();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('已保存: ${savedPaths.length} 张照片')),
+          SnackBar(
+            content: Text(
+              rawMaterials.isEmpty
+                  ? '已保存: ${savedPaths.length} 张照片'
+                  : '已保存无水印原图: ${savedPaths.length} 张',
+            ),
+          ),
         );
       }
       await _showPhotoToMeterQuickJumpIfNeeded(item);
@@ -2335,9 +4733,23 @@ class _HomePageState extends State<HomePage> {
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton.icon(
-                      onPressed: _exportZip,
+                      onPressed: _isExportingZip ? null : _exportZip,
                       icon: const Icon(Icons.folder_zip_outlined),
-                      label: const Text('打包导出照片 (ZIP)'),
+                      label: Text(
+                        _isExportingZip ? '正在打包照片...' : '打包导出照片 (ZIP)',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: () async {
+                        Navigator.pop(ctx);
+                        await _openCloudSyncPage();
+                      },
+                      icon: const Icon(Icons.cloud_sync_outlined),
+                      label: const Text('云端同步 (Gitee)'),
                     ),
                   ),
                   const SizedBox(height: 20),
@@ -2370,6 +4782,47 @@ class _HomePageState extends State<HomePage> {
                         child: OutlinedButton(
                           onPressed: () async {
                             setState(() => _saveDirectoryPath = null);
+                            setModalState(() {});
+                            await _saveData();
+                          },
+                          child: const Text('默认'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  const Text(
+                    '直拍保存路径',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.black12,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      _currentDirectCapturePathDisplay(),
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () =>
+                              _pickDirectCaptureSaveDirectory(setModalState),
+                          child: const Text('选择目录'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () async {
+                            setState(
+                              () => _directCaptureSaveDirectoryPath = null,
+                            );
                             setModalState(() {});
                             await _saveData();
                           },
@@ -2429,6 +4882,171 @@ class _HomePageState extends State<HomePage> {
                       await _saveData();
                     },
                   ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    '拍照设置',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      '进入拍照页延迟启动相机',
+                      style: TextStyle(fontSize: 14),
+                    ),
+                    subtitle: Text(
+                      _cameraAttachDelayEnabled
+                          ? '当前延迟 $_cameraAttachDelayMs ms，优先让页面转场完整跑完'
+                          : '关闭后会在转场结束后立即启动相机',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    value: _cameraAttachDelayEnabled,
+                    onChanged: (v) async {
+                      setState(() => _cameraAttachDelayEnabled = v);
+                      setModalState(() {});
+                      await _saveData();
+                    },
+                  ),
+                  Row(
+                    children: [
+                      Text(
+                        '$_cameraAttachDelayMs ms',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: _cameraAttachDelayEnabled
+                              ? Colors.black54
+                              : Colors.black38,
+                        ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        '0',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: _cameraAttachDelayEnabled
+                              ? Colors.black45
+                              : Colors.black26,
+                        ),
+                      ),
+                      Expanded(
+                        child: Slider(
+                          value: _cameraAttachDelayMs.toDouble(),
+                          min: 0,
+                          max: 1000,
+                          divisions: 20,
+                          label: '$_cameraAttachDelayMs ms',
+                          onChanged: _cameraAttachDelayEnabled
+                              ? (value) {
+                                  final next = value.round().clamp(0, 1000);
+                                  setState(() => _cameraAttachDelayMs = next);
+                                  setModalState(() {});
+                                }
+                              : null,
+                          onChangeEnd: _cameraAttachDelayEnabled
+                              ? (_) async {
+                                  await _saveData();
+                                }
+                              : null,
+                        ),
+                      ),
+                      Text(
+                        '1000',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: _cameraAttachDelayEnabled
+                              ? Colors.black45
+                              : Colors.black26,
+                        ),
+                      ),
+                    ],
+                  ),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      '默认启用拍照水印',
+                      style: TextStyle(fontSize: 14),
+                    ),
+                    subtitle: Text(
+                      _defaultWatermarkEnabled
+                          ? '进入拍照页时默认是水印模式'
+                          : '进入拍照页时默认保存无水印原图',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    value: _defaultWatermarkEnabled,
+                    onChanged: (v) async {
+                      await _setDefaultWatermarkEnabled(v);
+                      setModalState(() {});
+                    },
+                  ),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      '进线柜拍照默认在线 OCR',
+                      style: TextStyle(fontSize: 14),
+                    ),
+                    subtitle: const Text(
+                      '开启后，设备名里不带 ups，且同房仅剩 2-3 台这类设备时，会默认走百度仪表 OCR；仍可在抄表页右上角手动切换。',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    value: _incomingCabinetOnlineOcrEnabled,
+                    onChanged: (v) async {
+                      setState(() => _incomingCabinetOnlineOcrEnabled = v);
+                      setModalState(() {});
+                      await _saveData();
+                    },
+                  ),
+                  TextFormField(
+                    initialValue: _defaultWatermarkLocationFallback,
+                    decoration: const InputDecoration(
+                      labelText: '默认水印地址',
+                      hintText: '留空时默认使用房间位置',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onChanged: (value) {
+                      setState(() => _defaultWatermarkLocationFallback = value);
+                      setModalState(() {});
+                      unawaited(_saveData());
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                  TextFormField(
+                    initialValue: _defaultWatermarkImprintText,
+                    decoration: const InputDecoration(
+                      labelText: '默认验证文案',
+                      hintText: '留空时使用模板默认文案',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onChanged: (value) {
+                      setState(() => _defaultWatermarkImprintText = value);
+                      setModalState(() {});
+                      unawaited(_saveData());
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    '这两个默认值会参与云端同步，拉取覆盖后新开的拍照页会直接使用。',
+                    style: TextStyle(fontSize: 12, color: Colors.black54),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _pendingRawMaterialCount > 0
+                          ? () {
+                              Navigator.pop(ctx);
+                              _openRawBatchCompose();
+                            }
+                          : null,
+                      icon: const Icon(Icons.auto_fix_high),
+                      label: Text(
+                        _pendingRawMaterialCount > 0
+                            ? '批量合成无水印照片 ($_pendingRawMaterialCount)'
+                            : '批量合成无水印照片',
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
                   const Text(
                     '排序方式',
                     style: TextStyle(fontWeight: FontWeight.bold),
@@ -2724,6 +5342,23 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    final mergedRevealIndexById = <int, int>{};
+    var mergedRevealIndex = 0;
+    for (final row in _mergedRows) {
+      for (final segment in row.segments) {
+        for (final item in segment.items) {
+          mergedRevealIndexById[item.id] = mergedRevealIndex++;
+        }
+      }
+    }
+
+    final gridRevealBaseByType = <String, int>{};
+    var gridRevealIndex = 0;
+    for (final type in _sortedTypes) {
+      gridRevealBaseByType[type] = gridRevealIndex;
+      gridRevealIndex += _groupedData[type]?.length ?? 0;
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: const Text(
@@ -2759,6 +5394,33 @@ class _HomePageState extends State<HomePage> {
                   await _openMeterFeature();
                 },
               ),
+              ListTile(
+                leading: const Icon(Icons.camera_outlined),
+                title: const Text('直拍'),
+                subtitle: const Text('手动备注，连续拍照，独立目录保存'),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _openDirectCaptureMode();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.cloud_sync_outlined),
+                title: const Text('云端同步'),
+                subtitle: const Text('房间模板、超标时段与参数同步'),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _openCloudSyncPage();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.calendar_month_outlined),
+                title: const Text('巡检日历'),
+                subtitle: const Text('按日期查看五个巡检时段记录'),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _openInspectionCalendarPage();
+                },
+              ),
               const Divider(height: 24),
               const ListTile(
                 leading: Icon(Icons.add_box_outlined),
@@ -2775,18 +5437,12 @@ class _HomePageState extends State<HomePage> {
           FabMenuAction(
             label: '切到待办 ($_pendingCount)',
             icon: Icons.pending_actions_outlined,
-            onTap: () {
-              setState(() => _currentTabIndex = 0);
-              _recalculateDisplayData();
-            },
+            onTap: () => _switchCurrentTab(0),
           ),
           FabMenuAction(
             label: '切到完成 ($_completedCount)',
             icon: Icons.task_alt_outlined,
-            onTap: () {
-              setState(() => _currentTabIndex = 1);
-              _recalculateDisplayData();
-            },
+            onTap: () => _switchCurrentTab(1),
           ),
           FabMenuAction(
             label: '新增预设',
@@ -2797,6 +5453,18 @@ class _HomePageState extends State<HomePage> {
             label: '动力抄表',
             icon: Icons.fact_check_outlined,
             onTap: _openMeterFeature,
+          ),
+          FabMenuAction(
+            label: '直拍',
+            icon: Icons.camera_outlined,
+            onTap: _openDirectCaptureMode,
+          ),
+          FabMenuAction(
+            label: _pendingRawMaterialCount > 0
+                ? '批量合成原图 ($_pendingRawMaterialCount)'
+                : '批量合成原图',
+            icon: Icons.auto_fix_high,
+            onTap: _openRawBatchCompose,
           ),
           FabMenuAction(
             label: '删除已拍照片',
@@ -2848,23 +5516,11 @@ class _HomePageState extends State<HomePage> {
                           ),
                         ),
                         const SizedBox(height: 14),
-                        SizedBox(
-                          height: 44,
-                          child: ListView.builder(
-                            scrollDirection: Axis.horizontal,
-                            itemCount: _floorLabels.length,
-                            itemBuilder: (context, index) {
-                              final label = _floorLabels[index];
-                              return _FloorChip(
-                                label: label,
-                                selected: _floorFilter == label,
-                                onTap: () {
-                                  _floorFilter = label;
-                                  _recalculateDisplayData();
-                                },
-                              );
-                            },
-                          ),
+                        _AnimatedFloorFilterBar(
+                          labels: _floorLabels,
+                          selectedLabel: _floorFilter,
+                          selectionPulse: _floorFilterPulse,
+                          onSelect: _applyFloorFilter,
                         ),
                         const SizedBox(height: 18),
                       ],
@@ -3035,49 +5691,58 @@ class _HomePageState extends State<HomePage> {
                                                   SizedBox(
                                                     width: effectiveButtonSize,
                                                     height: effectiveButtonSize,
-                                                    child: RepaintBoundary(
-                                                      child: _RoomCard(
-                                                        key: ValueKey(
-                                                          row
+                                                    child: _FilterReveal(
+                                                      pulse: _roomRevealPulse,
+                                                      index:
+                                                          mergedRevealIndexById[row
                                                               .segments[i]
                                                               .items[j]
-                                                              .id,
-                                                        ),
-                                                        serial: row
-                                                            .segments[i]
-                                                            .items[j]
-                                                            .serial,
-                                                        location: row
-                                                            .segments[i]
-                                                            .items[j]
-                                                            .location,
-                                                        showLocation:
-                                                            _gridColumns <= 5,
-                                                        isCompleted: row
-                                                            .segments[i]
-                                                            .items[j]
-                                                            .isCompleted,
-                                                        onTap: () =>
+                                                              .id] ??
+                                                          0,
+                                                      child: RepaintBoundary(
+                                                        child: _RoomCard(
+                                                          key: ValueKey(
                                                             row
                                                                 .segments[i]
                                                                 .items[j]
-                                                                .isCompleted
-                                                            ? _showCompletedItemActions(
-                                                                row
-                                                                    .segments[i]
-                                                                    .items[j],
-                                                              )
-                                                            : _takePhoto(
+                                                                .id,
+                                                          ),
+                                                          serial: row
+                                                              .segments[i]
+                                                              .items[j]
+                                                              .serial,
+                                                          location: row
+                                                              .segments[i]
+                                                              .items[j]
+                                                              .location,
+                                                          showLocation:
+                                                              _gridColumns <= 5,
+                                                          isCompleted: row
+                                                              .segments[i]
+                                                              .items[j]
+                                                              .isCompleted,
+                                                          onTap: () =>
+                                                              row
+                                                                  .segments[i]
+                                                                  .items[j]
+                                                                  .isCompleted
+                                                              ? _showCompletedItemActions(
+                                                                  row
+                                                                      .segments[i]
+                                                                      .items[j],
+                                                                )
+                                                              : _takePhoto(
+                                                                  row
+                                                                      .segments[i]
+                                                                      .items[j],
+                                                                ),
+                                                          onLongPress: () =>
+                                                              _showAddEditDialog(
                                                                 row
                                                                     .segments[i]
                                                                     .items[j],
                                                               ),
-                                                        onLongPress: () =>
-                                                            _showAddEditDialog(
-                                                              row
-                                                                  .segments[i]
-                                                                  .items[j],
-                                                            ),
+                                                        ),
                                                       ),
                                                     ),
                                                   ),
@@ -3126,17 +5791,21 @@ class _HomePageState extends State<HomePage> {
                         ),
                         delegate: SliverChildBuilderDelegate((context, index) {
                           final it = _groupedData[type]![index];
-                          return RepaintBoundary(
-                            child: _RoomCard(
-                              key: ValueKey(it.id),
-                              serial: it.serial,
-                              location: it.location,
-                              showLocation: _gridColumns <= 5,
-                              isCompleted: it.isCompleted,
-                              onTap: () => it.isCompleted
-                                  ? _showCompletedItemActions(it)
-                                  : _takePhoto(it),
-                              onLongPress: () => _showAddEditDialog(it),
+                          return _FilterReveal(
+                            pulse: _roomRevealPulse,
+                            index: (gridRevealBaseByType[type] ?? 0) + index,
+                            child: RepaintBoundary(
+                              child: _RoomCard(
+                                key: ValueKey(it.id),
+                                serial: it.serial,
+                                location: it.location,
+                                showLocation: _gridColumns <= 5,
+                                isCompleted: it.isCompleted,
+                                onTap: () => it.isCompleted
+                                    ? _showCompletedItemActions(it)
+                                    : _takePhoto(it),
+                                onLongPress: () => _showAddEditDialog(it),
+                              ),
                             ),
                           );
                         }, childCount: _groupedData[type]!.length),
@@ -3155,10 +5824,2110 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
+class InspectionCalendarPage extends StatefulWidget {
+  final Map<String, InspectionCalendarDayRecord> initialRecords;
+  final Future<void> Function(Map<String, InspectionCalendarDayRecord> records)
+  onChanged;
+
+  const InspectionCalendarPage({
+    super.key,
+    required this.initialRecords,
+    required this.onChanged,
+  });
+
+  @override
+  State<InspectionCalendarPage> createState() => _InspectionCalendarPageState();
+}
+
+class _InspectionCalendarPageState extends State<InspectionCalendarPage> {
+  static const List<Color> _slotColors = [
+    Color(0xFF2563EB),
+    Color(0xFF0F766E),
+    Color(0xFFF59E0B),
+    Color(0xFFEA580C),
+    Color(0xFFDC2626),
+  ];
+
+  late Map<String, InspectionCalendarDayRecord> _records;
+  late DateTime _visibleMonth;
+  late DateTime _selectedDate;
+  late final List<String> _slotLabels;
+
+  @override
+  void initState() {
+    super.initState();
+    final today = DateTime.now();
+    _records = cloneInspectionCalendarRecords(widget.initialRecords);
+    _visibleMonth = normalizeInspectionCalendarMonth(today);
+    _selectedDate = DateTime(today.year, today.month, today.day);
+    _slotLabels = kDefaultMeterTimeSlots
+        .map((slot) => slot.label)
+        .toList(growable: false);
+  }
+
+  String get _selectedDateKey => formatInspectionCalendarDateKey(_selectedDate);
+
+  InspectionCalendarDayRecord get _selectedRecord =>
+      _records[_selectedDateKey] ??
+      InspectionCalendarDayRecord.empty(_selectedDateKey);
+
+  bool get _selectedDateIsToday =>
+      DateUtils.isSameDay(_selectedDate, DateTime.now());
+
+  String get _recommendedSlotLabel => nearestMeterTimeSlotLabel(DateTime.now());
+
+  Color _slotColorForIndex(int index) {
+    return _slotColors[index % _slotColors.length];
+  }
+
+  Future<void> _persistRecords() async {
+    await widget.onChanged(cloneInspectionCalendarRecords(_records));
+  }
+
+  void _applySlotsForDate(DateTime date, Set<String> completedSlots) {
+    final dateKey = formatInspectionCalendarDateKey(date);
+    final normalizedSlots = <String>{};
+    for (final slot in completedSlots) {
+      if (_slotLabels.contains(slot)) {
+        normalizedSlots.add(slot);
+      }
+    }
+
+    setState(() {
+      if (normalizedSlots.isEmpty) {
+        _records.remove(dateKey);
+      } else {
+        _records[dateKey] = InspectionCalendarDayRecord(
+          dateKey: dateKey,
+          completedSlots: normalizedSlots,
+          updatedAt: DateTime.now().toIso8601String(),
+        );
+      }
+    });
+    unawaited(_persistRecords());
+  }
+
+  void _toggleSelectedSlot(String label) {
+    final nextSlots = Set<String>.from(_selectedRecord.completedSlots);
+    if (!nextSlots.add(label)) {
+      nextSlots.remove(label);
+    }
+    _applySlotsForDate(_selectedDate, nextSlots);
+  }
+
+  void _markSelectedDayAllCompleted() {
+    _applySlotsForDate(_selectedDate, Set<String>.from(_slotLabels));
+  }
+
+  void _clearSelectedDay() {
+    _applySlotsForDate(_selectedDate, <String>{});
+  }
+
+  void _markRecommendedSlotForSelectedDay() {
+    final label = _recommendedSlotLabel;
+    if (label.isEmpty) {
+      return;
+    }
+    final nextSlots = Set<String>.from(_selectedRecord.completedSlots)
+      ..add(label);
+    _applySlotsForDate(_selectedDate, nextSlots);
+  }
+
+  void _jumpToToday() {
+    final now = DateTime.now();
+    setState(() {
+      _visibleMonth = normalizeInspectionCalendarMonth(now);
+      _selectedDate = DateTime(now.year, now.month, now.day);
+    });
+  }
+
+  void _changeMonth(int offset) {
+    final nextMonth = DateTime(
+      _visibleMonth.year,
+      _visibleMonth.month + offset,
+    );
+    final maxDay = DateUtils.getDaysInMonth(nextMonth.year, nextMonth.month);
+    setState(() {
+      _visibleMonth = nextMonth;
+      _selectedDate = DateTime(
+        nextMonth.year,
+        nextMonth.month,
+        math.min(_selectedDate.day, maxDay),
+      );
+    });
+  }
+
+  List<DateTime?> _buildMonthCells() {
+    final firstDayOfMonth = DateTime(
+      _visibleMonth.year,
+      _visibleMonth.month,
+      1,
+    );
+    final daysInMonth = DateUtils.getDaysInMonth(
+      _visibleMonth.year,
+      _visibleMonth.month,
+    );
+    final leadingEmptyCount = firstDayOfMonth.weekday - 1;
+    final cells = <DateTime?>[
+      for (int i = 0; i < leadingEmptyCount; i++) null,
+      for (int day = 1; day <= daysInMonth; day++)
+        DateTime(_visibleMonth.year, _visibleMonth.month, day),
+    ];
+    while (cells.length % 7 != 0) {
+      cells.add(null);
+    }
+    return cells;
+  }
+
+  Iterable<InspectionCalendarDayRecord> _recordsForMonth(DateTime month) sync* {
+    for (final entry in _records.entries) {
+      final date = parseInspectionCalendarDateKey(entry.key);
+      if (date == null) {
+        continue;
+      }
+      if (date.year == month.year && date.month == month.month) {
+        yield entry.value;
+      }
+    }
+  }
+
+  String _formatMonthTitle(DateTime month) {
+    final value = month.toLocal();
+    return '${value.year}年${value.month.toString().padLeft(2, '0')}月';
+  }
+
+  String _formatFullDate(DateTime date) {
+    final local = date.toLocal();
+    final weekday = kInspectionCalendarWeekdayLabels[local.weekday - 1];
+    return '${local.year}年${local.month.toString().padLeft(2, '0')}月${local.day.toString().padLeft(2, '0')}日 周$weekday';
+  }
+
+  String _formatUpdatedAt(String raw) {
+    final parsed = DateTime.tryParse(raw);
+    if (parsed == null) {
+      return raw.isEmpty ? '未记录' : raw;
+    }
+    final local = parsed.toLocal();
+    final month = local.month.toString().padLeft(2, '0');
+    final day = local.day.toString().padLeft(2, '0');
+    final hour = local.hour.toString().padLeft(2, '0');
+    final minute = local.minute.toString().padLeft(2, '0');
+    return '$month-$day $hour:$minute';
+  }
+
+  Widget _buildWeekdayHeader() {
+    return Row(
+      children: [
+        for (final label in kInspectionCalendarWeekdayLabels)
+          Expanded(
+            child: Center(
+              child: Text(
+                label,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF475467),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildLegend() {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (int index = 0; index < _slotLabels.length; index++)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: _slotColorForIndex(index).withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: _slotColorForIndex(index).withValues(alpha: 0.26),
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: _slotColorForIndex(index),
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  _slotLabels[index],
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildDayCell(DateTime? date) {
+    if (date == null) {
+      return const SizedBox.shrink();
+    }
+
+    final record = _records[formatInspectionCalendarDateKey(date)];
+    final completedSlots = record?.completedSlots ?? const <String>{};
+    final isSelected = DateUtils.isSameDay(date, _selectedDate);
+    final isToday = DateUtils.isSameDay(date, DateTime.now());
+    final borderColor = isSelected
+        ? Theme.of(context).colorScheme.primary
+        : isToday
+        ? const Color(0xFF60A5FA)
+        : const Color(0xFFE4E7EC);
+    final backgroundColor = isSelected
+        ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.12)
+        : isToday
+        ? const Color(0xFFF7FBFF)
+        : Colors.white;
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onTap: () {
+        setState(() {
+          _selectedDate = date;
+        });
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        decoration: BoxDecoration(
+          color: backgroundColor,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: borderColor, width: isSelected ? 1.6 : 1),
+          boxShadow: isSelected
+              ? [
+                  BoxShadow(
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.primary.withValues(alpha: 0.14),
+                    blurRadius: 12,
+                    offset: const Offset(0, 6),
+                  ),
+                ]
+              : const [],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '${date.day}',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: isSelected
+                          ? Theme.of(context).colorScheme.primary
+                          : const Color(0xFF101828),
+                    ),
+                  ),
+                ),
+                if (isToday)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFDBEAFE),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: const Text(
+                      '今',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF1D4ED8),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '${completedSlots.length}/${_slotLabels.length} 时段',
+              style: const TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF667085),
+              ),
+            ),
+            const Spacer(),
+            Wrap(
+              spacing: 3,
+              runSpacing: 3,
+              children: [
+                for (int index = 0; index < _slotLabels.length; index++)
+                  Container(
+                    width: completedSlots.contains(_slotLabels[index]) ? 12 : 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      color: completedSlots.contains(_slotLabels[index])
+                          ? _slotColorForIndex(index)
+                          : const Color(0xFFD0D5DD),
+                      borderRadius: BorderRadius.circular(99),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final monthRecords = _recordsForMonth(
+      _visibleMonth,
+    ).toList(growable: false);
+    final monthActiveDays = monthRecords.length;
+    final monthCompletedSlots = monthRecords.fold<int>(
+      0,
+      (sum, record) => sum + record.completedCount,
+    );
+    final monthDays = DateUtils.getDaysInMonth(
+      _visibleMonth.year,
+      _visibleMonth.month,
+    );
+    final todayRecord =
+        _records[formatInspectionCalendarDateKey(DateTime.now())];
+    final todayCompletedCount = todayRecord?.completedCount ?? 0;
+    final cells = _buildMonthCells();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('巡检日历'),
+        actions: [
+          TextButton.icon(
+            onPressed: _jumpToToday,
+            icon: const Icon(Icons.today_outlined),
+            label: const Text('今天'),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+        children: [
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8FAFC),
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: const Color(0xFFE4E7EC)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '本月巡检概览',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '${_formatMonthTitle(_visibleMonth)} 已记录 $monthCompletedSlots 次时段巡检',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF667085),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _InspectionCalendarStatTile(
+                        label: '有记录天数',
+                        value: '$monthActiveDays/$monthDays',
+                        hint: '当月覆盖',
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _InspectionCalendarStatTile(
+                        label: '时段命中数',
+                        value: '$monthCompletedSlots',
+                        hint: '五时段累计',
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _InspectionCalendarStatTile(
+                        label: '今天进度',
+                        value: '$todayCompletedCount/${_slotLabels.length}',
+                        hint: '今日巡检',
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(999),
+                  child: LinearProgressIndicator(
+                    value: monthDays == 0 ? 0 : monthActiveDays / monthDays,
+                    minHeight: 8,
+                    backgroundColor: const Color(0xFFE4E7EC),
+                    valueColor: const AlwaysStoppedAnimation<Color>(
+                      Color(0xFF2563EB),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: const Color(0xFFE4E7EC)),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x0A101828),
+                  blurRadius: 18,
+                  offset: Offset(0, 8),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    IconButton(
+                      onPressed: () => _changeMonth(-1),
+                      icon: const Icon(Icons.chevron_left_rounded),
+                      tooltip: '上个月',
+                    ),
+                    Expanded(
+                      child: Text(
+                        _formatMonthTitle(_visibleMonth),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => _changeMonth(1),
+                      icon: const Icon(Icons.chevron_right_rounded),
+                      tooltip: '下个月',
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                _buildLegend(),
+                const SizedBox(height: 16),
+                _buildWeekdayHeader(),
+                const SizedBox(height: 10),
+                GridView.count(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  crossAxisCount: 7,
+                  crossAxisSpacing: 8,
+                  mainAxisSpacing: 8,
+                  childAspectRatio: 0.78,
+                  children: cells.map(_buildDayCell).toList(growable: false),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: const Color(0xFFE4E7EC)),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x0A101828),
+                  blurRadius: 18,
+                  offset: Offset(0, 8),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _formatFullDate(_selectedDate),
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _selectedDateIsToday
+                                ? '当前最近时段：${_recommendedSlotLabel.isEmpty ? '未匹配' : _recommendedSlotLabel}'
+                                : '当天已记录 ${_selectedRecord.completedCount}/${_slotLabels.length} 个时段',
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: Color(0xFF667085),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF2F4F7),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Text(
+                        '${_selectedRecord.completedCount}/${_slotLabels.length}',
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (int index = 0; index < _slotLabels.length; index++)
+                      FilterChip(
+                        selected: _selectedRecord.completedSlots.contains(
+                          _slotLabels[index],
+                        ),
+                        showCheckmark: false,
+                        avatar:
+                            _selectedDateIsToday &&
+                                _recommendedSlotLabel == _slotLabels[index]
+                            ? Icon(
+                                Icons.access_time_rounded,
+                                size: 16,
+                                color: _slotColorForIndex(index),
+                              )
+                            : null,
+                        label: Text(_slotLabels[index]),
+                        selectedColor: _slotColorForIndex(
+                          index,
+                        ).withValues(alpha: 0.14),
+                        side: BorderSide(
+                          color:
+                              _selectedRecord.completedSlots.contains(
+                                _slotLabels[index],
+                              )
+                              ? _slotColorForIndex(index)
+                              : const Color(0xFFD0D5DD),
+                        ),
+                        labelStyle: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color:
+                              _selectedRecord.completedSlots.contains(
+                                _slotLabels[index],
+                              )
+                              ? _slotColorForIndex(index)
+                              : const Color(0xFF344054),
+                        ),
+                        onSelected: (_) =>
+                            _toggleSelectedSlot(_slotLabels[index]),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  _selectedRecord.updatedAt.isEmpty
+                      ? '当天暂未记录'
+                      : '最后更新：${_formatUpdatedAt(_selectedRecord.updatedAt)}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF667085),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    if (_selectedDateIsToday &&
+                        _recommendedSlotLabel.isNotEmpty)
+                      OutlinedButton.icon(
+                        onPressed: _markRecommendedSlotForSelectedDay,
+                        icon: const Icon(Icons.access_time_rounded),
+                        label: Text('补记 $_recommendedSlotLabel'),
+                      ),
+                    FilledButton.icon(
+                      onPressed: _slotLabels.isEmpty
+                          ? null
+                          : _markSelectedDayAllCompleted,
+                      icon: const Icon(Icons.done_all_rounded),
+                      label: const Text('当天全部完成'),
+                    ),
+                    TextButton.icon(
+                      onPressed: _selectedRecord.completedSlots.isEmpty
+                          ? null
+                          : _clearSelectedDay,
+                      icon: const Icon(Icons.cleaning_services_outlined),
+                      label: const Text('清空当天'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  '提示：用户成功拍照后，系统会按当前时间自动记到最近的巡检时段；这里也支持手动补录和修正。',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF667085)),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InspectionCalendarStatTile extends StatelessWidget {
+  final String label;
+  final String value;
+  final String hint;
+
+  const _InspectionCalendarStatTile({
+    required this.label,
+    required this.value,
+    required this.hint,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFE4E7EC)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF667085),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            hint,
+            style: const TextStyle(fontSize: 12, color: Color(0xFF98A2B3)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class ShiftAwareInspectionCalendarPage extends StatefulWidget {
+  final Map<String, InspectionCalendarDayRecord> initialRecords;
+  final InspectionShiftScheduleConfig initialScheduleConfig;
+  final Future<void> Function(Map<String, InspectionCalendarDayRecord> records)
+  onRecordsChanged;
+  final Future<void> Function(InspectionShiftScheduleConfig config)
+  onScheduleConfigChanged;
+
+  const ShiftAwareInspectionCalendarPage({
+    super.key,
+    required this.initialRecords,
+    required this.initialScheduleConfig,
+    required this.onRecordsChanged,
+    required this.onScheduleConfigChanged,
+  });
+
+  @override
+  State<ShiftAwareInspectionCalendarPage> createState() =>
+      _ShiftAwareInspectionCalendarPageState();
+}
+
+class _ShiftAwareInspectionCalendarPageState
+    extends State<ShiftAwareInspectionCalendarPage> {
+  static const List<Color> _slotColors = [
+    Color(0xFF2563EB),
+    Color(0xFF0F766E),
+    Color(0xFFF59E0B),
+    Color(0xFFEA580C),
+    Color(0xFFDC2626),
+  ];
+
+  late Map<String, InspectionCalendarDayRecord> _records;
+  late InspectionShiftScheduleConfig _scheduleConfig;
+  late DateTime _visibleMonth;
+  late DateTime _selectedDate;
+  late final List<String> _slotLabels;
+
+  @override
+  void initState() {
+    super.initState();
+    final today = normalizeInspectionCalendarDate(DateTime.now());
+    _records = cloneInspectionCalendarRecords(widget.initialRecords);
+    _scheduleConfig = widget.initialScheduleConfig;
+    _visibleMonth = normalizeInspectionCalendarMonth(today);
+    _selectedDate = today;
+    _slotLabels = kDefaultMeterTimeSlots
+        .map((slot) => slot.label)
+        .toList(growable: false);
+  }
+
+  String get _selectedDateKey => formatInspectionCalendarDateKey(_selectedDate);
+
+  InspectionCalendarDayRecord get _selectedRecord =>
+      _records[_selectedDateKey] ??
+      InspectionCalendarDayRecord.empty(_selectedDateKey);
+
+  InspectionShiftType get _selectedShiftType =>
+      inspectionShiftTypeForDate(_selectedDate, _scheduleConfig);
+
+  List<String> get _selectedRequiredSlots =>
+      inspectionRequiredSlotsForShift(_selectedShiftType);
+
+  List<String> get _selectedAssignedSlots =>
+      assignedInspectionSlotsForDate(_selectedDate, _scheduleConfig);
+
+  bool get _selectedDateIsToday =>
+      DateUtils.isSameDay(_selectedDate, DateTime.now());
+
+  String get _recommendedSlotLabel =>
+      matchedInspectionSlotLabelForMoment(DateTime.now(), _scheduleConfig);
+
+  DateTime get _firstMorningShiftDate =>
+      parseInspectionCalendarDateKey(
+        _scheduleConfig.firstMorningShiftDateKey,
+      ) ??
+      normalizeInspectionCalendarDate(DateTime.now());
+
+  DateTime get _firstInspectionDate =>
+      inspectionRotationStartDateForConfig(_scheduleConfig);
+
+  InspectionShiftType get _firstInspectionShiftType =>
+      inspectionShiftTypeForDate(_firstInspectionDate, _scheduleConfig);
+
+  List<String> get _firstInspectionCandidateSlots =>
+      inspectionRequiredSlotsForDate(_firstInspectionDate, _scheduleConfig);
+
+  String get _firstInspectionSlotLabel =>
+      resolveInspectionRotationStartSlotLabel(_scheduleConfig);
+
+  Color _slotColorForIndex(int index) =>
+      _slotColors[index % _slotColors.length];
+
+  Color _shiftColor(InspectionShiftType shiftType) {
+    switch (shiftType) {
+      case InspectionShiftType.morning:
+        return const Color(0xFF2563EB);
+      case InspectionShiftType.middle:
+        return const Color(0xFFEA580C);
+      case InspectionShiftType.night:
+        return const Color(0xFF7C3AED);
+      case InspectionShiftType.rest:
+        return const Color(0xFF98A2B3);
+    }
+  }
+
+  Future<void> _persistRecords() async {
+    await widget.onRecordsChanged(cloneInspectionCalendarRecords(_records));
+  }
+
+  Future<void> _persistScheduleConfig() async {
+    await widget.onScheduleConfigChanged(_scheduleConfig);
+  }
+
+  List<String> _assignedSlotsForDate(DateTime date) {
+    return assignedInspectionSlotsForDate(date, _scheduleConfig);
+  }
+
+  int _completedAssignedCount(DateTime date, Set<String> completedSlots) {
+    final assignedSlots = _assignedSlotsForDate(date);
+    var count = 0;
+    for (final slot in assignedSlots) {
+      if (completedSlots.contains(slot)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  bool _isAssignedInspectionDay(DateTime date) {
+    return _assignedSlotsForDate(date).isNotEmpty;
+  }
+
+  bool _isAssignedInspectionDayCompleted(DateTime date) {
+    final assignedSlots = _assignedSlotsForDate(date);
+    if (assignedSlots.isEmpty) {
+      return false;
+    }
+    final record =
+        _records[formatInspectionCalendarDateKey(date)] ??
+        InspectionCalendarDayRecord.empty(
+          formatInspectionCalendarDateKey(date),
+        );
+    return _completedAssignedCount(date, record.completedSlots) >=
+        assignedSlots.length;
+  }
+
+  void _applySlotsForDate(DateTime date, Set<String> completedSlots) {
+    final dateKey = formatInspectionCalendarDateKey(date);
+    final normalizedSlots = <String>{};
+    for (final slot in completedSlots) {
+      if (_slotLabels.contains(slot)) {
+        normalizedSlots.add(slot);
+      }
+    }
+
+    setState(() {
+      if (normalizedSlots.isEmpty) {
+        _records.remove(dateKey);
+      } else {
+        _records[dateKey] = InspectionCalendarDayRecord(
+          dateKey: dateKey,
+          completedSlots: normalizedSlots,
+          updatedAt: DateTime.now().toIso8601String(),
+        );
+      }
+    });
+    unawaited(_persistRecords());
+  }
+
+  void _toggleSelectedSlot(String label) {
+    final nextSlots = Set<String>.from(_selectedRecord.completedSlots);
+    if (!nextSlots.add(label)) {
+      nextSlots.remove(label);
+    }
+    _applySlotsForDate(_selectedDate, nextSlots);
+  }
+
+  void _markSelectedShiftCompleted() {
+    if (_selectedAssignedSlots.isEmpty) {
+      return;
+    }
+    final nextSlots = Set<String>.from(_selectedRecord.completedSlots)
+      ..addAll(_selectedAssignedSlots);
+    _applySlotsForDate(_selectedDate, nextSlots);
+  }
+
+  void _markSelectedDayAllCompleted() {
+    _applySlotsForDate(_selectedDate, Set<String>.from(_slotLabels));
+  }
+
+  void _clearSelectedDay() {
+    _applySlotsForDate(_selectedDate, <String>{});
+  }
+
+  void _markRecommendedSlotForSelectedDay() {
+    if (_recommendedSlotLabel.isEmpty) {
+      return;
+    }
+    final nextSlots = Set<String>.from(_selectedRecord.completedSlots)
+      ..add(_recommendedSlotLabel);
+    _applySlotsForDate(_selectedDate, nextSlots);
+  }
+
+  void _jumpToToday() {
+    final now = normalizeInspectionCalendarDate(DateTime.now());
+    setState(() {
+      _visibleMonth = normalizeInspectionCalendarMonth(now);
+      _selectedDate = now;
+    });
+  }
+
+  void _changeMonth(int offset) {
+    final nextMonth = DateTime(
+      _visibleMonth.year,
+      _visibleMonth.month + offset,
+    );
+    final maxDay = DateUtils.getDaysInMonth(nextMonth.year, nextMonth.month);
+    setState(() {
+      _visibleMonth = nextMonth;
+      _selectedDate = DateTime(
+        nextMonth.year,
+        nextMonth.month,
+        math.min(_selectedDate.day, maxDay),
+      );
+    });
+  }
+
+  Future<void> _pickFirstMorningShiftDate() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _firstMorningShiftDate,
+      firstDate: DateTime(now.year - 5, 1, 1),
+      lastDate: DateTime(now.year + 5, 12, 31),
+      helpText: '选择第一个早班日期',
+    );
+    if (picked == null || !mounted) {
+      return;
+    }
+    setState(() {
+      _scheduleConfig = _scheduleConfig.copyWith(
+        firstMorningShiftDateKey: formatInspectionCalendarDateKey(picked),
+      );
+    });
+    unawaited(_persistScheduleConfig());
+  }
+
+  void _changeRotationMemberCount(int delta) {
+    final nextCount = math.max(1, _scheduleConfig.rotationMemberCount + delta);
+    if (nextCount == _scheduleConfig.rotationMemberCount) {
+      return;
+    }
+    setState(() {
+      _scheduleConfig = _scheduleConfig.copyWith(
+        rotationMemberCount: nextCount,
+      );
+    });
+    unawaited(_persistScheduleConfig());
+  }
+
+  Future<void> _pickFirstInspectionDate() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _firstInspectionDate,
+      firstDate: DateTime(now.year - 5, 1, 1),
+      lastDate: DateTime(now.year + 5, 12, 31),
+      helpText: '选择首次轮到巡检日期',
+    );
+    if (picked == null || !mounted) {
+      return;
+    }
+
+    final normalizedPicked = normalizeInspectionCalendarDate(picked);
+    final candidateSlots = inspectionRequiredSlotsForDate(
+      normalizedPicked,
+      _scheduleConfig,
+    );
+    if (candidateSlots.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('所选日期是休息日，不能作为首次轮值日期')));
+      return;
+    }
+
+    final nextSlotLabel = candidateSlots.contains(_firstInspectionSlotLabel)
+        ? _firstInspectionSlotLabel
+        : candidateSlots.first;
+    setState(() {
+      _scheduleConfig = _scheduleConfig.copyWith(
+        firstInspectionDateKey: formatInspectionCalendarDateKey(
+          normalizedPicked,
+        ),
+        firstInspectionSlotLabel: nextSlotLabel,
+      );
+    });
+    unawaited(_persistScheduleConfig());
+  }
+
+  void _setFirstInspectionSlotLabel(String label) {
+    if (label.trim().isEmpty || label == _firstInspectionSlotLabel) {
+      return;
+    }
+    setState(() {
+      _scheduleConfig = _scheduleConfig.copyWith(
+        firstInspectionSlotLabel: label,
+      );
+    });
+    unawaited(_persistScheduleConfig());
+  }
+
+  List<DateTime?> _buildMonthCells() {
+    final firstDayOfMonth = DateTime(
+      _visibleMonth.year,
+      _visibleMonth.month,
+      1,
+    );
+    final daysInMonth = DateUtils.getDaysInMonth(
+      _visibleMonth.year,
+      _visibleMonth.month,
+    );
+    final leadingEmptyCount = firstDayOfMonth.weekday - 1;
+    final cells = <DateTime?>[
+      for (int i = 0; i < leadingEmptyCount; i++) null,
+      for (int day = 1; day <= daysInMonth; day++)
+        DateTime(_visibleMonth.year, _visibleMonth.month, day),
+    ];
+    while (cells.length % 7 != 0) {
+      cells.add(null);
+    }
+    return cells;
+  }
+
+  int _countWorkingDaysInMonth(DateTime month) {
+    final monthDays = DateUtils.getDaysInMonth(month.year, month.month);
+    var count = 0;
+    for (int day = 1; day <= monthDays; day++) {
+      if (_isAssignedInspectionDay(DateTime(month.year, month.month, day))) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  int _countCompletedWorkingDaysInMonth(DateTime month) {
+    final monthDays = DateUtils.getDaysInMonth(month.year, month.month);
+    var count = 0;
+    for (int day = 1; day <= monthDays; day++) {
+      if (_isAssignedInspectionDayCompleted(
+        DateTime(month.year, month.month, day),
+      )) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  int _countRequiredInspectionsInMonth(DateTime month) {
+    final monthDays = DateUtils.getDaysInMonth(month.year, month.month);
+    var count = 0;
+    for (int day = 1; day <= monthDays; day++) {
+      count += _assignedSlotsForDate(
+        DateTime(month.year, month.month, day),
+      ).length;
+    }
+    return count;
+  }
+
+  int _countCompletedRequiredInspectionsInMonth(DateTime month) {
+    final monthDays = DateUtils.getDaysInMonth(month.year, month.month);
+    var count = 0;
+    for (int day = 1; day <= monthDays; day++) {
+      final date = DateTime(month.year, month.month, day);
+      final record =
+          _records[formatInspectionCalendarDateKey(date)] ??
+          InspectionCalendarDayRecord.empty(
+            formatInspectionCalendarDateKey(date),
+          );
+      count += _completedAssignedCount(date, record.completedSlots);
+    }
+    return count;
+  }
+
+  String _formatMonthTitle(DateTime month) {
+    final value = month.toLocal();
+    return '${value.year}年${value.month.toString().padLeft(2, '0')}月';
+  }
+
+  String _formatFullDate(DateTime date) {
+    final local = date.toLocal();
+    final weekday = kInspectionCalendarWeekdayLabels[local.weekday - 1];
+    return '${local.year}年${local.month.toString().padLeft(2, '0')}月${local.day.toString().padLeft(2, '0')}日 周$weekday';
+  }
+
+  String _formatUpdatedAt(String raw) {
+    final parsed = DateTime.tryParse(raw);
+    if (parsed == null) {
+      return raw.isEmpty ? '未记录' : raw;
+    }
+    final local = parsed.toLocal();
+    final month = local.month.toString().padLeft(2, '0');
+    final day = local.day.toString().padLeft(2, '0');
+    final hour = local.hour.toString().padLeft(2, '0');
+    final minute = local.minute.toString().padLeft(2, '0');
+    return '$month-$day $hour:$minute';
+  }
+
+  Widget _buildShiftPatternChips() {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: [
+        for (final shiftType in kInspectionShiftCycle)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: _shiftColor(shiftType).withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: _shiftColor(shiftType).withValues(alpha: 0.2),
+              ),
+            ),
+            child: Text(
+              inspectionShiftTypeShortLabel(shiftType),
+              style: TextStyle(
+                fontWeight: FontWeight.w800,
+                color: _shiftColor(shiftType),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildShiftLegend() {
+    final entries = <InspectionShiftType>[
+      InspectionShiftType.morning,
+      InspectionShiftType.middle,
+      InspectionShiftType.night,
+      InspectionShiftType.rest,
+    ];
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (final shiftType in entries)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: _shiftColor(shiftType).withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: _shiftColor(shiftType).withValues(alpha: 0.22),
+              ),
+            ),
+            child: Text(
+              shiftType == InspectionShiftType.rest
+                  ? '休息：无需巡检'
+                  : '${inspectionShiftTypeLabel(shiftType)}：${inspectionRequiredSlotsForShift(shiftType).join('、')}',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: _shiftColor(shiftType),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildUpcomingSchedulePreview() {
+    final start = normalizeInspectionCalendarDate(DateTime.now());
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (int offset = 0; offset < 8; offset++)
+          Builder(
+            builder: (context) {
+              final date = start.add(Duration(days: offset));
+              final shiftType = inspectionShiftTypeForDate(
+                date,
+                _scheduleConfig,
+              );
+              final shiftSlots = inspectionRequiredSlotsForShift(shiftType);
+              final assignedSlots = _assignedSlotsForDate(date);
+              final isRestDay = shiftType == InspectionShiftType.rest;
+              final isAssignedDay = assignedSlots.isNotEmpty;
+              return Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: _shiftColor(shiftType).withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: _shiftColor(shiftType).withValues(alpha: 0.18),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '${date.month}/${date.day}',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      inspectionShiftTypeLabel(shiftType),
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        color: _shiftColor(shiftType),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      isRestDay
+                          ? '当天休息'
+                          : isAssignedDay
+                          ? '轮到 ${assignedSlots.join('、')}'
+                          : '今天轮休',
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                    if (!isRestDay) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        '全班 ${shiftSlots.join('、')}',
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: Color(0xFF667085),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              );
+            },
+          ),
+      ],
+    );
+  }
+
+  Widget _buildWeekdayHeader() {
+    return Row(
+      children: [
+        for (final label in kInspectionCalendarWeekdayLabels)
+          Expanded(
+            child: Center(
+              child: Text(
+                label,
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF475467),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildSlotLegend() {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (int index = 0; index < _slotLabels.length; index++)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: _slotColorForIndex(index).withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: _slotColorForIndex(index).withValues(alpha: 0.26),
+              ),
+            ),
+            child: Text(
+              _slotLabels[index],
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: _slotColorForIndex(index),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  String _compactSlotLabel(String label) {
+    return label.replaceAll('点', '').trim();
+  }
+
+  Widget _buildShiftBadge(InspectionShiftType shiftType) {
+    final shiftColor = _shiftColor(shiftType);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: shiftColor.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        inspectionShiftTypeShortLabel(shiftType),
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w800,
+          color: shiftColor,
+          height: 1,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAssignedSlotBadges(
+    List<String> assignedSlots,
+    Set<String> completedSlots,
+    InspectionShiftType shiftType,
+  ) {
+    if (shiftType == InspectionShiftType.rest) {
+      return const Text(
+        '当日休息',
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          color: Color(0xFF98A2B3),
+        ),
+      );
+    }
+
+    if (assignedSlots.isEmpty) {
+      return Text(
+        '今天轮休',
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w700,
+          color: _shiftColor(shiftType).withValues(alpha: 0.8),
+        ),
+      );
+    }
+
+    return Wrap(
+      spacing: 4,
+      runSpacing: 4,
+      children: [
+        for (int index = 0; index < assignedSlots.length; index++)
+          Container(
+            constraints: const BoxConstraints(minWidth: 18),
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            decoration: BoxDecoration(
+              color: completedSlots.contains(assignedSlots[index])
+                  ? _slotColorForIndex(index).withValues(alpha: 0.16)
+                  : const Color(0xFFF2F4F7),
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: completedSlots.contains(assignedSlots[index])
+                    ? _slotColorForIndex(index).withValues(alpha: 0.45)
+                    : const Color(0xFFD0D5DD),
+              ),
+            ),
+            child: Text(
+              _compactSlotLabel(assignedSlots[index]),
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 8.5,
+                fontWeight: FontWeight.w800,
+                color: completedSlots.contains(assignedSlots[index])
+                    ? _slotColorForIndex(index)
+                    : const Color(0xFF98A2B3),
+                height: 1,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildDayCell(DateTime? date) {
+    if (date == null) {
+      return const SizedBox.shrink();
+    }
+
+    final dateKey = formatInspectionCalendarDateKey(date);
+    final record = _records[dateKey];
+    final completedSlots = record?.completedSlots ?? const <String>{};
+    final shiftType = inspectionShiftTypeForDate(date, _scheduleConfig);
+    final assignedSlots = _assignedSlotsForDate(date);
+    final assignedCount = assignedSlots.length;
+    final completedAssignedCount = _completedAssignedCount(
+      date,
+      completedSlots,
+    );
+    final extraCompletedCount = completedSlots
+        .where((slot) => !assignedSlots.contains(slot))
+        .length;
+    final isSelected = DateUtils.isSameDay(date, _selectedDate);
+    final isToday = DateUtils.isSameDay(date, DateTime.now());
+    final shiftColor = _shiftColor(shiftType);
+
+    final borderColor = isSelected
+        ? Theme.of(context).colorScheme.primary
+        : isToday
+        ? shiftColor.withValues(alpha: 0.9)
+        : const Color(0xFFE4E7EC);
+    final backgroundColor = isSelected
+        ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.1)
+        : shiftType == InspectionShiftType.rest
+        ? const Color(0xFFF8FAFC)
+        : assignedCount == 0
+        ? shiftColor.withValues(alpha: 0.025)
+        : shiftColor.withValues(alpha: 0.06);
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onTap: () {
+        setState(() {
+          _selectedDate = date;
+        });
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.fromLTRB(7, 7, 7, 6),
+        decoration: BoxDecoration(
+          color: backgroundColor,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: borderColor, width: isSelected ? 1.6 : 1),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${date.day}',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                    height: 1,
+                    color: isSelected
+                        ? Theme.of(context).colorScheme.primary
+                        : const Color(0xFF101828),
+                  ),
+                ),
+                const Spacer(),
+                if (isToday)
+                  Container(
+                    width: 7,
+                    height: 7,
+                    margin: const EdgeInsets.only(top: 3),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF2563EB),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 5),
+            Row(
+              children: [
+                _buildShiftBadge(shiftType),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    shiftType == InspectionShiftType.rest
+                        ? '休息'
+                        : assignedCount == 0
+                        ? '轮休'
+                        : '$completedAssignedCount/$assignedCount',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF667085),
+                      height: 1.1,
+                    ),
+                  ),
+                ),
+                if (extraCompletedCount > 0)
+                  Container(
+                    margin: const EdgeInsets.only(left: 3),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFEEF2FF),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      '+$extraCompletedCount',
+                      style: const TextStyle(
+                        fontSize: 8.5,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF4F46E5),
+                        height: 1,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Expanded(
+              child: Align(
+                alignment: Alignment.topLeft,
+                child: _buildAssignedSlotBadges(
+                  assignedSlots,
+                  completedSlots,
+                  shiftType,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final today = normalizeInspectionCalendarDate(DateTime.now());
+    final todayShiftType = inspectionShiftTypeForDate(today, _scheduleConfig);
+    final todayShiftRequiredSlots = inspectionRequiredSlotsForShift(
+      todayShiftType,
+    );
+    final todayAssignedSlots = _assignedSlotsForDate(today);
+    final todayRecord =
+        _records[formatInspectionCalendarDateKey(today)] ??
+        InspectionCalendarDayRecord.empty(
+          formatInspectionCalendarDateKey(today),
+        );
+    final todayCompletedCount = _completedAssignedCount(
+      today,
+      todayRecord.completedSlots,
+    );
+
+    final selectedShiftRequiredSlots = _selectedRequiredSlots;
+    final selectedAssignedSlots = _selectedAssignedSlots;
+    final selectedAssignedCount = selectedAssignedSlots.length;
+    final selectedCompletedCount = _completedAssignedCount(
+      _selectedDate,
+      _selectedRecord.completedSlots,
+    );
+    final selectedExtraCount =
+        _selectedRecord.completedSlots.length - selectedCompletedCount;
+    final selectedSummaryLabel = _selectedShiftType == InspectionShiftType.rest
+        ? '休息'
+        : selectedAssignedCount == 0
+        ? '轮休'
+        : '$selectedCompletedCount/$selectedAssignedCount';
+    final selectedPrimaryDescription =
+        _selectedShiftType == InspectionShiftType.rest
+        ? '这一天是休息日，无需巡检。'
+        : selectedAssignedCount == 0
+        ? '这一天是${inspectionShiftTypeLabel(_selectedShiftType)}，但这次没有轮到你。'
+        : '这一天轮到你巡检：${selectedAssignedSlots.join('、')}。';
+    final selectedSecondaryDescription =
+        _selectedShiftType == InspectionShiftType.rest
+        ? ''
+        : '全班应巡时段：${selectedShiftRequiredSlots.join('、')}';
+
+    final monthWorkingDays = _countWorkingDaysInMonth(_visibleMonth);
+    final monthCompletedDays = _countCompletedWorkingDaysInMonth(_visibleMonth);
+    final monthRequiredCount = _countRequiredInspectionsInMonth(_visibleMonth);
+    final monthCompletedCount = _countCompletedRequiredInspectionsInMonth(
+      _visibleMonth,
+    );
+    final progressValue = monthRequiredCount == 0
+        ? 0.0
+        : monthCompletedCount / monthRequiredCount;
+    final cells = _buildMonthCells();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('巡检日历'),
+        actions: [
+          TextButton.icon(
+            onPressed: _jumpToToday,
+            icon: const Icon(Icons.today_outlined),
+            label: const Text('今天'),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+        children: [
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8FAFC),
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: const Color(0xFFE4E7EC)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '个人排班计划',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  '按“早早中中晚晚休休”8天循环，再结合轮班人数与首次轮值日期，自动算出今天是否轮到你以及该巡哪个时段。',
+                  style: TextStyle(fontSize: 13, color: Color(0xFF667085)),
+                ),
+                const SizedBox(height: 14),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final isCompact = constraints.maxWidth < 420;
+                    final itemWidth = isCompact
+                        ? (constraints.maxWidth - 10) / 2
+                        : (constraints.maxWidth - 20) / 3;
+                    return Wrap(
+                      spacing: 10,
+                      runSpacing: 10,
+                      children: [
+                        SizedBox(
+                          width: itemWidth,
+                          child: _InspectionCalendarStatTile(
+                            label: '本月轮到天',
+                            value: '$monthCompletedDays/$monthWorkingDays',
+                            hint: '按个人轮值',
+                          ),
+                        ),
+                        SizedBox(
+                          width: itemWidth,
+                          child: _InspectionCalendarStatTile(
+                            label: '本月轮到次',
+                            value: '$monthCompletedCount/$monthRequiredCount',
+                            hint: '按个人轮值',
+                          ),
+                        ),
+                        SizedBox(
+                          width: itemWidth,
+                          child: _InspectionCalendarStatTile(
+                            label: '今日安排',
+                            value: todayShiftType == InspectionShiftType.rest
+                                ? '休息'
+                                : todayAssignedSlots.isEmpty
+                                ? '轮休'
+                                : '$todayCompletedCount/${todayAssignedSlots.length}',
+                            hint: todayShiftType == InspectionShiftType.rest
+                                ? '今天无需巡检'
+                                : todayAssignedSlots.isEmpty
+                                ? '班次 ${inspectionShiftTypeLabel(todayShiftType)} · 全班 ${todayShiftRequiredSlots.join('、')}'
+                                : '轮到 ${todayAssignedSlots.join('、')} · 全班 ${todayShiftRequiredSlots.join('、')}',
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+                const SizedBox(height: 14),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(999),
+                  child: LinearProgressIndicator(
+                    value: progressValue.clamp(0.0, 1.0),
+                    minHeight: 8,
+                    backgroundColor: const Color(0xFFE4E7EC),
+                    valueColor: const AlwaysStoppedAnimation<Color>(
+                      Color(0xFF2563EB),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '第一个早班日期：${_scheduleConfig.firstMorningShiftDateKey}',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _pickFirstMorningShiftDate,
+                      icon: const Icon(Icons.edit_calendar_outlined),
+                      label: const Text('改起始早班'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '轮班人数：${_scheduleConfig.rotationMemberCount} 人',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    IconButton.outlined(
+                      onPressed: _scheduleConfig.rotationMemberCount <= 1
+                          ? null
+                          : () => _changeRotationMemberCount(-1),
+                      icon: const Icon(Icons.remove),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      onPressed: () => _changeRotationMemberCount(1),
+                      icon: const Icon(Icons.add),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '首次轮到巡检：${_scheduleConfig.firstInspectionDateKey}',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _pickFirstInspectionDate,
+                      icon: const Icon(Icons.event_repeat_outlined),
+                      label: const Text('改首次轮值'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  _firstInspectionShiftType == InspectionShiftType.rest
+                      ? '首次轮值日期不能是休息日，请重新选择。'
+                      : _firstInspectionShiftType == InspectionShiftType.night
+                      ? '首次轮值是晚班，请再选一个起始时段。'
+                      : '首次轮值班次：${inspectionShiftTypeLabel(_firstInspectionShiftType)}，起始时段会自动固定为 ${_firstInspectionSlotLabel}。',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF667085),
+                  ),
+                ),
+                if (_firstInspectionCandidateSlots.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final slotLabel in _firstInspectionCandidateSlots)
+                        ChoiceChip(
+                          label: Text(slotLabel),
+                          selected: _firstInspectionSlotLabel == slotLabel,
+                          onSelected: _firstInspectionCandidateSlots.length == 1
+                              ? null
+                              : (_) => _setFirstInspectionSlotLabel(slotLabel),
+                        ),
+                    ],
+                  ),
+                ],
+                const SizedBox(height: 12),
+                _buildShiftPatternChips(),
+                const SizedBox(height: 12),
+                _buildShiftLegend(),
+                const SizedBox(height: 12),
+                _buildUpcomingSchedulePreview(),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: const Color(0xFFE4E7EC)),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x0A101828),
+                  blurRadius: 18,
+                  offset: Offset(0, 8),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    IconButton(
+                      onPressed: () => _changeMonth(-1),
+                      icon: const Icon(Icons.chevron_left_rounded),
+                    ),
+                    Expanded(
+                      child: Text(
+                        _formatMonthTitle(_visibleMonth),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed: () => _changeMonth(1),
+                      icon: const Icon(Icons.chevron_right_rounded),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                _buildSlotLegend(),
+                const SizedBox(height: 16),
+                _buildWeekdayHeader(),
+                const SizedBox(height: 10),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final isCompact = constraints.maxWidth < 380;
+                    final spacing = isCompact ? 5.0 : 8.0;
+                    final cellWidth = (constraints.maxWidth - spacing * 6) / 7;
+                    final cellHeight = math.max(
+                      isCompact ? 92.0 : 100.0,
+                      cellWidth * (isCompact ? 1.5 : 1.55),
+                    );
+                    return GridView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: cells.length,
+                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 7,
+                        crossAxisSpacing: spacing,
+                        mainAxisSpacing: spacing,
+                        mainAxisExtent: cellHeight,
+                      ),
+                      itemBuilder: (context, index) =>
+                          _buildDayCell(cells[index]),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: const Color(0xFFE4E7EC)),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x0A101828),
+                  blurRadius: 18,
+                  offset: Offset(0, 8),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _formatFullDate(_selectedDate),
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            '班次：${inspectionShiftTypeLabel(_selectedShiftType)}',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: _shiftColor(_selectedShiftType),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: _shiftColor(
+                          _selectedShiftType,
+                        ).withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(16),
+                      ),
+                      child: Text(
+                        selectedSummaryLabel,
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          color: _shiftColor(_selectedShiftType),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  selectedPrimaryDescription,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF667085),
+                  ),
+                ),
+                if (selectedSecondaryDescription.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    selectedSecondaryDescription,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF667085),
+                    ),
+                  ),
+                ],
+                if (_selectedDateIsToday &&
+                    _recommendedSlotLabel.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    '当前时间最适合补记：$_recommendedSlotLabel',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF2563EB),
+                    ),
+                  ),
+                ],
+                if (selectedExtraCount > 0) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    '另外还记录了 $selectedExtraCount 个非计划时段，系统会一并保留。',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF667085),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (int index = 0; index < _slotLabels.length; index++)
+                      FilterChip(
+                        selected: _selectedRecord.completedSlots.contains(
+                          _slotLabels[index],
+                        ),
+                        showCheckmark: false,
+                        avatar:
+                            _selectedDateIsToday &&
+                                _recommendedSlotLabel == _slotLabels[index]
+                            ? Icon(
+                                Icons.access_time_rounded,
+                                size: 16,
+                                color: _slotColorForIndex(index),
+                              )
+                            : selectedAssignedSlots.contains(_slotLabels[index])
+                            ? Icon(
+                                Icons.person_pin_circle_outlined,
+                                size: 16,
+                                color: _slotColorForIndex(index),
+                              )
+                            : selectedShiftRequiredSlots.contains(
+                                _slotLabels[index],
+                              )
+                            ? Icon(
+                                Icons.flag_outlined,
+                                size: 16,
+                                color: _shiftColor(_selectedShiftType),
+                              )
+                            : null,
+                        label: Text(_slotLabels[index]),
+                        selectedColor: _slotColorForIndex(
+                          index,
+                        ).withValues(alpha: 0.14),
+                        side: BorderSide(
+                          color:
+                              _selectedRecord.completedSlots.contains(
+                                _slotLabels[index],
+                              )
+                              ? _slotColorForIndex(index)
+                              : const Color(0xFFD0D5DD),
+                        ),
+                        labelStyle: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          color:
+                              _selectedRecord.completedSlots.contains(
+                                _slotLabels[index],
+                              )
+                              ? _slotColorForIndex(index)
+                              : const Color(0xFF344054),
+                        ),
+                        onSelected: (_) =>
+                            _toggleSelectedSlot(_slotLabels[index]),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  _selectedRecord.updatedAt.isEmpty
+                      ? '当天暂未记录'
+                      : '最后更新：${_formatUpdatedAt(_selectedRecord.updatedAt)}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF667085),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    if (selectedAssignedCount > 0)
+                      FilledButton.icon(
+                        onPressed: _markSelectedShiftCompleted,
+                        icon: const Icon(Icons.done_all_rounded),
+                        label: const Text('完成我的轮值'),
+                      ),
+                    if (_selectedDateIsToday &&
+                        _recommendedSlotLabel.isNotEmpty)
+                      OutlinedButton.icon(
+                        onPressed: _markRecommendedSlotForSelectedDay,
+                        icon: const Icon(Icons.access_time_rounded),
+                        label: Text('补记 $_recommendedSlotLabel'),
+                      ),
+                    OutlinedButton.icon(
+                      onPressed: _markSelectedDayAllCompleted,
+                      icon: const Icon(Icons.fact_check_outlined),
+                      label: const Text('全部时段记完'),
+                    ),
+                    TextButton.icon(
+                      onPressed: _selectedRecord.completedSlots.isEmpty
+                          ? null
+                          : _clearSelectedDay,
+                      icon: const Icon(Icons.cleaning_services_outlined),
+                      label: const Text('清空当天'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  '自动规则：排班计划会自动判断今天是不是轮到你，并给出当前最匹配的巡检时段；记录仍然会保留你手动补记的额外时段。',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF667085)),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class MeterRoomsPage extends StatefulWidget {
   final List<InspectionItem> allInspectionItems;
   final List<MeterRoom> meterRooms;
   final List<CameraDescription> cameras;
+  final bool defaultIncomingCabinetOnlineOcrEnabled;
   final Future<void> Function(List<MeterRoom>) onSave;
   final MeterRoom Function(InspectionItem item) onCreateRoomFromInspection;
 
@@ -3167,6 +7936,7 @@ class MeterRoomsPage extends StatefulWidget {
     required this.allInspectionItems,
     required this.meterRooms,
     required this.cameras,
+    required this.defaultIncomingCabinetOnlineOcrEnabled,
     required this.onSave,
     required this.onCreateRoomFromInspection,
   });
@@ -3178,36 +7948,128 @@ class MeterRoomsPage extends StatefulWidget {
 class _MeterRoomsPageState extends State<MeterRoomsPage> {
   late List<MeterRoom> _rooms;
 
+  Map<String, dynamic> _buildMeterTemplatePayload() {
+    return <String, dynamic>{
+      'version': 2,
+      'templateType': 'meter_room_template',
+      'exportedAt': DateTime.now().toIso8601String(),
+      'rooms': _rooms
+          .map(
+            (room) => <String, dynamic>{
+              'roomId': room.roomId,
+              'roomName': room.roomName,
+              'roomType': room.roomType,
+              'location': room.location,
+              'devices': room.devices
+                  .map((device) => <String, dynamic>{'name': device.name})
+                  .toList(growable: false),
+            },
+          )
+          .toList(growable: false),
+    };
+  }
+
+  Map<String, dynamic> _buildMeterDataPayload() {
+    final deviceCount = _rooms.fold<int>(
+      0,
+      (sum, room) => sum + room.devices.length,
+    );
+
+    return <String, dynamic>{
+      'version': 2,
+      'templateType': 'meter_room_data',
+      'exportedAt': DateTime.now().toIso8601String(),
+      'roomCount': _rooms.length,
+      'deviceCount': deviceCount,
+      'rooms': _rooms.map((room) => room.toJson()).toList(growable: false),
+    };
+  }
+
+  List<MeterRoom> _parseMeterTemplateRooms(dynamic decoded) {
+    final rooms = (decoded is Map<String, dynamic>)
+        ? (decoded['rooms'] as List<dynamic>? ?? const <dynamic>[])
+        : const <dynamic>[];
+
+    return rooms
+        .map((entry) {
+          final roomMap = entry as Map<String, dynamic>;
+          final deviceEntries =
+              roomMap['devices'] as List<dynamic>? ?? const [];
+          return MeterRoom(
+            roomId: roomMap['roomId'] is int
+                ? roomMap['roomId']
+                : DateTime.now().millisecondsSinceEpoch,
+            roomName: (roomMap['roomName'] ?? '').toString(),
+            roomType: (roomMap['roomType'] ?? '').toString(),
+            location: (roomMap['location'] ?? '').toString(),
+            devices: deviceEntries
+                .map(
+                  (deviceEntry) => MeterDevice(
+                    name:
+                        (((deviceEntry as Map<String, dynamic>)['name']) ??
+                                '未命名设备')
+                            .toString(),
+                  ),
+                )
+                .toList(growable: false),
+          );
+        })
+        .toList(growable: false);
+  }
+
+  Future<void> _openMeterOverloadPage() async {
+    await Navigator.push(
+      context,
+      buildAppRoute(
+        page: MeterOverloadPage(
+          currentRooms: _rooms,
+          onApplyToCurrentRooms: (rooms) async {
+            if (!mounted) {
+              return;
+            }
+            setState(() {
+              _rooms = rooms
+                  .map(
+                    (room) => MeterRoom(
+                      roomId: room.roomId,
+                      roomName: room.roomName,
+                      roomType: room.roomType,
+                      location: room.location,
+                      devices: room.devices
+                          .map(
+                            (device) => MeterDevice(
+                              name: device.name,
+                              values: List<String>.from(device.values),
+                            ),
+                          )
+                          .toList(growable: false),
+                    ),
+                  )
+                  .toList(growable: false);
+            });
+            await widget.onSave(_rooms);
+          },
+        ),
+      ),
+    );
+  }
+
   Future<void> _exportRoomConfig() async {
     try {
-      final data = {
-        'version': 1,
-        'exportedAt': DateTime.now().toIso8601String(),
-        'rooms': _rooms
-            .map(
-              (r) => {
-                'roomId': r.roomId,
-                'roomName': r.roomName,
-                'roomType': r.roomType,
-                'location': r.location,
-                'devices': r.devices.map((d) => {'name': d.name}).toList(),
-              },
-            )
-            .toList(),
-      };
+      final data = _buildMeterTemplatePayload();
 
       final dir = await getTemporaryDirectory();
       final file = File(
         path.join(
           dir.path,
-          '抄表房间配置_${DateTime.now().millisecondsSinceEpoch}.json',
+          '抄表设备模板_${DateTime.now().millisecondsSinceEpoch}.json',
         ),
       );
       await file.writeAsString(
         const JsonEncoder.withIndent('  ').convert(data),
       );
 
-      await Share.shareXFiles([XFile(file.path)], text: '抄表房间配置导出');
+      await Share.shareXFiles([XFile(file.path)], text: '抄表设备模板导出');
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -3227,37 +8089,14 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
       final filePath = picked.files.single.path!;
       final text = await File(filePath).readAsString();
       final decoded = jsonDecode(text);
-      final List<dynamic> rooms = (decoded is Map<String, dynamic>)
-          ? (decoded['rooms'] as List<dynamic>? ?? [])
-          : [];
-      if (rooms.isEmpty) {
+      final imported = _parseMeterTemplateRooms(decoded);
+      if (imported.isEmpty) {
         if (!mounted) return;
         ScaffoldMessenger.of(
           context,
-        ).showSnackBar(const SnackBar(content: Text('导入文件无有效房间配置')));
+        ).showSnackBar(const SnackBar(content: Text('导入文件无有效设备模板')));
         return;
       }
-
-      final imported = rooms.map((e) {
-        final m = e as Map<String, dynamic>;
-        final List<dynamic> ds = m['devices'] as List<dynamic>? ?? [];
-        return MeterRoom(
-          roomId: m['roomId'] is int
-              ? m['roomId']
-              : DateTime.now().millisecondsSinceEpoch,
-          roomName: (m['roomName'] ?? '').toString(),
-          roomType: (m['roomType'] ?? '').toString(),
-          location: (m['location'] ?? '').toString(),
-          devices: ds
-              .map(
-                (d) => MeterDevice(
-                  name: ((d as Map<String, dynamic>)['name'] ?? '未命名设备')
-                      .toString(),
-                ),
-              )
-              .toList(),
-        );
-      }).toList();
 
       setState(() => _rooms = imported);
       await widget.onSave(_rooms);
@@ -3265,7 +8104,7 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('已导入 ${_rooms.length} 个房间配置')));
+      ).showSnackBar(SnackBar(content: Text('已导入 ${_rooms.length} 个房间的设备模板')));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -3276,122 +8115,25 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
 
   Future<void> _exportMeterData() async {
     try {
-      final data = {
-        'version': 1,
-        'exportedAt': DateTime.now().toIso8601String(),
-        'rooms': _rooms.map((r) => r.toJson()).toList(),
-      };
+      final data = _buildMeterDataPayload();
 
       final dir = await getTemporaryDirectory();
       final file = File(
         path.join(
           dir.path,
-          '抄表数据_${DateTime.now().millisecondsSinceEpoch}.json',
+          '当前抄表数据_${DateTime.now().millisecondsSinceEpoch}.json',
         ),
       );
       await file.writeAsString(
         const JsonEncoder.withIndent('  ').convert(data),
       );
 
-      await Share.shareXFiles([XFile(file.path)], text: '抄表数据导出');
+      await Share.shareXFiles([XFile(file.path)], text: '当前抄表数据导出');
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('抄表数据导出失败: $e')));
-    }
-  }
-
-  Future<void> _importMeterData() async {
-    try {
-      final picked = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['json'],
-      );
-      if (picked == null || picked.files.single.path == null) return;
-
-      final filePath = picked.files.single.path!;
-      final text = await File(filePath).readAsString();
-      final decoded = jsonDecode(text);
-      final List<dynamic> rooms = (decoded is Map<String, dynamic>)
-          ? (decoded['rooms'] as List<dynamic>? ?? [])
-          : [];
-
-      if (rooms.isEmpty) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('导入文件无有效抄表数据')));
-        return;
-      }
-
-      final imported = rooms.map((e) {
-        final m = e as Map<String, dynamic>;
-        final List<dynamic> ds = m['devices'] as List<dynamic>? ?? [];
-
-        return MeterRoom(
-          roomId: m['roomId'] is int
-              ? m['roomId']
-              : DateTime.now().millisecondsSinceEpoch,
-          roomName: (m['roomName'] ?? '').toString(),
-          roomType: (m['roomType'] ?? '').toString(),
-          location: (m['location'] ?? '').toString(),
-          devices: ds.map((d) {
-            final dm = d as Map<String, dynamic>;
-            final rawValues = dm['values'];
-            List<String> values = List<String>.from(
-              MeterDevice.defaultMeterValues(),
-            );
-            if (rawValues is List) {
-              final parsed = rawValues
-                  .map((v) => (v ?? '').toString())
-                  .toList();
-              for (int i = 0; i < values.length && i < parsed.length; i++) {
-                values[i] = parsed[i];
-              }
-            }
-
-            return MeterDevice(
-              name: (dm['name'] ?? '未命名设备').toString(),
-              values: values,
-            );
-          }).toList(),
-        );
-      }).toList();
-
-      if (!mounted) return;
-      final confirm = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('导入抄表数据'),
-          content: Text('即将导入 ${imported.length} 个房间的数据，并覆盖当前动力抄表页数据，是否继续？'),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('取消'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('导入覆盖'),
-            ),
-          ],
-        ),
-      );
-
-      if (confirm != true) return;
-
-      setState(() => _rooms = imported);
-      await widget.onSave(_rooms);
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('已导入 ${_rooms.length} 个房间的抄表数据')));
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('导入抄表数据失败: $e')));
+      ).showSnackBar(SnackBar(content: Text('导出失败: $e')));
     }
   }
 
@@ -3521,23 +8263,28 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
         heroTag: 'fab_main_action',
         actions: [
           FabMenuAction(
+            label: '动力超标',
+            icon: Icons.warning_amber_rounded,
+            onTap: _openMeterOverloadPage,
+          ),
+          FabMenuAction(
             label: '添加房间',
             icon: Icons.add_home_work_outlined,
             onTap: _pickRoomAndAdd,
           ),
           FabMenuAction(
-            label: '导入配置',
+            label: '导入设备模板',
             icon: Icons.file_download_outlined,
             onTap: _importRoomConfig,
           ),
           FabMenuAction(
-            label: '导入抄表数据',
-            icon: Icons.data_array_outlined,
-            onTap: _importMeterData,
+            label: '导出设备模板',
+            icon: Icons.data_object_outlined,
+            onTap: _exportRoomConfig,
           ),
           FabMenuAction(
-            label: '导出抄表数据',
-            icon: Icons.data_object_outlined,
+            label: '导出当前抄表数据',
+            icon: Icons.file_upload_outlined,
             onTap: _exportMeterData,
           ),
           FabMenuAction(
@@ -3571,9 +8318,11 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
                     await Navigator.push(
                       context,
                       buildAppRoute(
-                        MeterDetailPage(
+                        page: MeterDetailPage(
                           room: room,
                           cameras: widget.cameras,
+                          defaultIncomingCabinetOnlineOcrEnabled:
+                              widget.defaultIncomingCabinetOnlineOcrEnabled,
                           onChanged: () async {
                             await widget.onSave(_rooms);
                             if (mounted) setState(() {});
@@ -3612,14 +8361,1422 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
   }
 }
 
+class MeterOverloadPage extends StatefulWidget {
+  final List<MeterRoom> currentRooms;
+  final Future<void> Function(List<MeterRoom> rooms)? onApplyToCurrentRooms;
+
+  const MeterOverloadPage({
+    super.key,
+    this.currentRooms = const <MeterRoom>[],
+    this.onApplyToCurrentRooms,
+  });
+
+  @override
+  State<MeterOverloadPage> createState() => _MeterOverloadPageState();
+}
+
+class _MeterOverloadPageState extends State<MeterOverloadPage> {
+  bool _isLoading = true;
+  bool _isExporting = false;
+  bool _isUpdatingSlot = false;
+  bool _isApplyingToCurrent = false;
+  int _selectedIndex = 0;
+  String? _loadError;
+  List<MeterTimeSlotDataset> _datasets = const [];
+  List<MeterRoom> _currentRoomsDraft = const [];
+  final math.Random _random = math.Random();
+  late final TextEditingController _downRangeCtrl;
+  late final TextEditingController _upRangeCtrl;
+  Set<String> _lockedDeviceKeys = <String>{};
+
+  bool get _isBusy => _isExporting || _isUpdatingSlot || _isApplyingToCurrent;
+
+  int _nearestSlotIndex(DateTime now) {
+    return nearestMeterTimeSlotIndex(now, slots: kDefaultMeterTimeSlots);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _currentRoomsDraft = _cloneMeterRooms(widget.currentRooms);
+    _downRangeCtrl = TextEditingController(text: '5');
+    _upRangeCtrl = TextEditingController(text: '5');
+    _loadDatasets();
+  }
+
+  @override
+  void dispose() {
+    _downRangeCtrl.dispose();
+    _upRangeCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadDatasets() async {
+    setState(() {
+      _isLoading = true;
+      _loadError = null;
+    });
+
+    try {
+      final datasets = <MeterTimeSlotDataset>[];
+      final prefs = await SharedPreferences.getInstance();
+      final stored = prefs.getString(kPrefMeterOverloadTemplatesKey);
+      if (stored != null && stored.trim().isNotEmpty) {
+        final decodedList = jsonDecode(stored);
+        if (decodedList is List) {
+          for (final entry in decodedList.whereType<Map>()) {
+            final map = Map<String, dynamic>.from(
+              entry.map((key, value) => MapEntry(key.toString(), value)),
+            );
+            final label = (map['label'] ?? '').toString().trim();
+            final assetPath = (map['assetPath'] ?? '').toString().trim();
+            final rawData = map['rawData'];
+            if (label.isEmpty || rawData is! Map) {
+              continue;
+            }
+            final normalizedRawData = Map<String, dynamic>.from(
+              rawData.map((key, value) => MapEntry(key.toString(), value)),
+            );
+            datasets.add(
+              MeterTimeSlotDataset(
+                slot: MeterTimeSlotDefinition(
+                  label: label,
+                  assetPath: assetPath,
+                ),
+                exportedAt: (normalizedRawData['exportedAt'] ?? '').toString(),
+                rawData: normalizedRawData,
+                rooms: _parseMeterRoomsFromRawData(normalizedRawData),
+              ),
+            );
+          }
+        }
+      }
+
+      if (datasets.isEmpty) {
+        for (final slot in kDefaultMeterTimeSlots) {
+          final text = await rootBundle.loadString(slot.assetPath);
+          final decoded = jsonDecode(text);
+          if (decoded is! Map<String, dynamic>) {
+            throw const FormatException('时段数据格式不正确');
+          }
+
+          datasets.add(
+            MeterTimeSlotDataset(
+              slot: slot,
+              exportedAt: (decoded['exportedAt'] ?? '').toString(),
+              rawData: Map<String, dynamic>.from(decoded),
+              rooms: _parseMeterRoomsFromRawData(decoded),
+            ),
+          );
+        }
+      }
+
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _datasets = datasets;
+        _selectedIndex = datasets.isEmpty
+            ? 0
+            : _nearestSlotIndex(DateTime.now()).clamp(0, datasets.length - 1);
+        _isLoading = false;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _loadError = error.toString();
+        _isLoading = false;
+      });
+    }
+  }
+
+  List<MeterRoom> _parseMeterRoomsFromRawData(Map<String, dynamic> rawData) {
+    final rooms = <MeterRoom>[];
+    final rawRooms = rawData['rooms'];
+    if (rawRooms is List) {
+      for (final entry in rawRooms) {
+        if (entry is Map) {
+          rooms.add(
+            MeterRoom.fromJson(
+              Map<String, dynamic>.from(
+                entry.map((key, value) => MapEntry(key.toString(), value)),
+              ),
+            ),
+          );
+        }
+      }
+    }
+    return rooms;
+  }
+
+  String _formatExportedAt(String raw) {
+    final parsed = DateTime.tryParse(raw);
+    if (parsed == null) {
+      return raw.isEmpty ? '未知' : raw;
+    }
+    final local = parsed.toLocal();
+    final month = local.month.toString().padLeft(2, '0');
+    final day = local.day.toString().padLeft(2, '0');
+    final hour = local.hour.toString().padLeft(2, '0');
+    final minute = local.minute.toString().padLeft(2, '0');
+    return '${local.year}-$month-$day $hour:$minute';
+  }
+
+  int _decimalPlaces(String raw) {
+    final normalized = raw.trim();
+    final dotIndex = normalized.indexOf('.');
+    if (dotIndex < 0) {
+      return 0;
+    }
+    return normalized.length - dotIndex - 1;
+  }
+
+  String _formatRandomizedValue(double value, String originalRaw) {
+    final decimals = _decimalPlaces(originalRaw);
+    return value.toStringAsFixed(decimals);
+  }
+
+  String _deviceLockKey(
+    MeterTimeSlotDataset dataset,
+    MeterRoom room,
+    MeterDevice device,
+  ) {
+    return '${dataset.slot.label}::${room.roomId}::${device.name}';
+  }
+
+  bool _isDeviceLocked(
+    MeterTimeSlotDataset dataset,
+    MeterRoom room,
+    MeterDevice device,
+  ) {
+    return _lockedDeviceKeys.contains(_deviceLockKey(dataset, room, device));
+  }
+
+  int _lockedDeviceCountForDataset(MeterTimeSlotDataset dataset) {
+    var count = 0;
+    for (final room in dataset.rooms) {
+      for (final device in room.devices) {
+        if (_isDeviceLocked(dataset, room, device)) {
+          count++;
+        }
+      }
+    }
+    return count;
+  }
+
+  List<Map<String, dynamic>> _lockedDeviceSummariesForDataset(
+    MeterTimeSlotDataset dataset,
+  ) {
+    final summaries = <Map<String, dynamic>>[];
+    for (final room in dataset.rooms) {
+      for (final device in room.devices) {
+        if (_isDeviceLocked(dataset, room, device)) {
+          summaries.add({
+            'roomId': room.roomId,
+            'roomName': room.roomName,
+            'deviceName': device.name,
+          });
+        }
+      }
+    }
+    return summaries;
+  }
+
+  MeterRoom _cloneMeterRoom(MeterRoom room) {
+    return MeterRoom(
+      roomId: room.roomId,
+      roomName: room.roomName,
+      roomType: room.roomType,
+      location: room.location,
+      devices: room.devices
+          .map(
+            (device) => MeterDevice(
+              name: device.name,
+              values: List<String>.from(device.values),
+            ),
+          )
+          .toList(growable: false),
+    );
+  }
+
+  List<MeterRoom> _cloneMeterRooms(List<MeterRoom> rooms) {
+    return rooms.map(_cloneMeterRoom).toList(growable: false);
+  }
+
+  int get _currentRoomCount => _currentRoomsDraft.length;
+
+  int get _currentDeviceCount =>
+      _currentRoomsDraft.fold<int>(0, (sum, room) => sum + room.devices.length);
+
+  ({double downPercent, double upPercent})? _readRandomRangePercent() {
+    final down = double.tryParse(_downRangeCtrl.text.trim());
+    final up = double.tryParse(_upRangeCtrl.text.trim());
+    if (down == null || up == null || down < 0 || up < 0) {
+      return null;
+    }
+    return (downPercent: down, upPercent: up);
+  }
+
+  String _randomizeCurrentValue(
+    String raw,
+    double downPercent,
+    double upPercent,
+  ) {
+    final original = double.tryParse(raw.trim());
+    if (original == null || original == 0) {
+      return raw;
+    }
+
+    final minFactor = math.max(0.0, 1 - downPercent / 100);
+    final maxFactor = 1 + upPercent / 100;
+    final factor = minFactor + _random.nextDouble() * (maxFactor - minFactor);
+    final randomized = math.max(0.0, original * factor);
+    return _formatRandomizedValue(randomized, raw);
+  }
+
+  Map<String, dynamic> _buildRandomizedPayload(
+    MeterTimeSlotDataset dataset, {
+    required double downPercent,
+    required double upPercent,
+  }) {
+    int randomizedValueCount = 0;
+    final lockedDeviceSummaries = _lockedDeviceSummariesForDataset(dataset);
+    final randomizedRooms = dataset.rooms.map((room) {
+      return {
+        'roomId': room.roomId,
+        'roomName': room.roomName,
+        'roomType': room.roomType,
+        'location': room.location,
+        'devices': room.devices.map((device) {
+          final values = List<String>.from(device.values);
+          if (!_isDeviceLocked(dataset, room, device)) {
+            for (int i = 3; i <= 5 && i < values.length; i++) {
+              final oldValue = values[i];
+              final newValue = _randomizeCurrentValue(
+                oldValue,
+                downPercent,
+                upPercent,
+              );
+              if (newValue != oldValue) {
+                randomizedValueCount++;
+              }
+              values[i] = newValue;
+            }
+          }
+          return {'name': device.name, 'values': values};
+        }).toList(),
+      };
+    }).toList();
+
+    final payload = Map<String, dynamic>.from(dataset.rawData);
+    payload['rooms'] = randomizedRooms;
+    payload['selectedTimeSlot'] = dataset.slot.label;
+    payload['randomized'] = true;
+    payload['randomizedAt'] = DateTime.now().toIso8601String();
+    payload['randomizedValueCount'] = randomizedValueCount;
+    payload['lockedDeviceCount'] = lockedDeviceSummaries.length;
+    payload['lockedDevices'] = lockedDeviceSummaries;
+    payload['randomRangePercent'] = {'down': downPercent, 'up': upPercent};
+    return payload;
+  }
+
+  Map<String, dynamic> _serializeDatasetEntry(MeterTimeSlotDataset dataset) {
+    return <String, dynamic>{
+      'label': dataset.slot.label,
+      'assetPath': dataset.slot.assetPath,
+      'rawData': dataset.rawData,
+    };
+  }
+
+  Map<String, dynamic> _buildStoredPayloadFromCurrentRooms(
+    MeterTimeSlotDataset dataset, {
+    required String exportedAt,
+  }) {
+    final payload = Map<String, dynamic>.from(dataset.rawData);
+    payload.remove('selectedTimeSlot');
+    payload.remove('exportedFromAppAt');
+    payload.remove('randomized');
+    payload.remove('randomizedAt');
+    payload.remove('randomizedValueCount');
+    payload.remove('lockedDeviceCount');
+    payload.remove('lockedDevices');
+    payload.remove('randomRangePercent');
+    payload['version'] = (payload['version'] as num?)?.toInt() ?? 1;
+    payload['exportedAt'] = exportedAt;
+    payload['updatedFromCurrentMeterDataAt'] = exportedAt;
+    payload['rooms'] = _currentRoomsDraft
+        .map((room) => room.toJson())
+        .toList(growable: false);
+    return payload;
+  }
+
+  Set<String> _pruneLockedKeysForDataset(
+    MeterTimeSlotDataset dataset,
+    Set<String> source,
+  ) {
+    final validKeys = <String>{};
+    for (final room in dataset.rooms) {
+      for (final device in room.devices) {
+        validKeys.add(_deviceLockKey(dataset, room, device));
+      }
+    }
+
+    return source.where((key) {
+      if (!key.startsWith('${dataset.slot.label}::')) {
+        return true;
+      }
+      return validKeys.contains(key);
+    }).toSet();
+  }
+
+  Future<bool> _confirmWriteCurrentRoomsToSelectedSlot(
+    MeterTimeSlotDataset dataset,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('写入 ${dataset.slot.label} 时段'),
+          content: Text(
+            '这会用当前抄表页的 $_currentRoomCount 个房间、$_currentDeviceCount 台设备覆盖 ${dataset.slot.label} 时段模板。\n\n'
+            '写入后，这个时段后续的导出和云端同步都会使用新数据。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('确认写入'),
+            ),
+          ],
+        );
+      },
+    );
+    return confirmed ?? false;
+  }
+
+  Future<void> _writeCurrentRoomsToSelectedSlot() async {
+    if (_datasets.isEmpty || _isUpdatingSlot) {
+      return;
+    }
+    if (_currentRoomsDraft.isEmpty) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('当前没有可写入的抄表数据')));
+      return;
+    }
+
+    final currentDataset = _datasets[_selectedIndex];
+    final confirmed = await _confirmWriteCurrentRoomsToSelectedSlot(
+      currentDataset,
+    );
+    if (!confirmed || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _isUpdatingSlot = true;
+    });
+
+    try {
+      final exportedAt = DateTime.now().toIso8601String();
+      final updatedRawData = _buildStoredPayloadFromCurrentRooms(
+        currentDataset,
+        exportedAt: exportedAt,
+      );
+      final updatedDataset = MeterTimeSlotDataset(
+        slot: currentDataset.slot,
+        exportedAt: exportedAt,
+        rawData: updatedRawData,
+        rooms: _parseMeterRoomsFromRawData(updatedRawData),
+      );
+      final nextDatasets = List<MeterTimeSlotDataset>.from(_datasets);
+      nextDatasets[_selectedIndex] = updatedDataset;
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        kPrefMeterOverloadTemplatesKey,
+        jsonEncode(
+          nextDatasets.map(_serializeDatasetEntry).toList(growable: false),
+        ),
+      );
+
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _datasets = nextDatasets;
+        _lockedDeviceKeys = _pruneLockedKeysForDataset(
+          updatedDataset,
+          _lockedDeviceKeys,
+        );
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已将当前抄表数据写入 ${currentDataset.slot.label} 时段')),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('写入时段失败: $error')));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUpdatingSlot = false;
+        });
+      }
+    }
+  }
+
+  Future<bool> _confirmApplySelectedSlotToCurrentRooms(
+    MeterTimeSlotDataset dataset,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('应用 ${dataset.slot.label} 时段'),
+          content: Text(
+            '这会用 ${dataset.slot.label} 时段模板的 ${dataset.roomCount} 个房间、${dataset.deviceCount} 台设备覆盖当前抄表数据。\n\n'
+            '覆盖后，抄表页里的当前房间设备数据会立即变成这个时段模板内容。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('确认覆盖'),
+            ),
+          ],
+        );
+      },
+    );
+    return confirmed ?? false;
+  }
+
+  Future<void> _applySelectedSlotToCurrentRooms() async {
+    if (_datasets.isEmpty || _isApplyingToCurrent) {
+      return;
+    }
+    final applyCallback = widget.onApplyToCurrentRooms;
+    if (applyCallback == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('当前入口不支持回写到抄表数据')));
+      return;
+    }
+
+    final currentDataset = _datasets[_selectedIndex];
+    final confirmed = await _confirmApplySelectedSlotToCurrentRooms(
+      currentDataset,
+    );
+    if (!confirmed || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _isApplyingToCurrent = true;
+    });
+
+    try {
+      final nextRooms = _cloneMeterRooms(currentDataset.rooms);
+      await applyCallback(nextRooms);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _currentRoomsDraft = _cloneMeterRooms(nextRooms);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('已将 ${currentDataset.slot.label} 时段模板覆盖到当前抄表数据'),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('覆盖当前抄表数据失败: $error')));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isApplyingToCurrent = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _openLockedDevicePage() async {
+    if (_datasets.isEmpty) {
+      return;
+    }
+
+    final dataset = _datasets[_selectedIndex];
+    final result = await Navigator.push<Set<String>>(
+      context,
+      buildAppRoute(
+        page: MeterLockedDevicesPage(
+          dataset: dataset,
+          initialLockedKeys: _lockedDeviceKeys,
+        ),
+      ),
+    );
+    if (result == null || !mounted) {
+      return;
+    }
+    setState(() {
+      _lockedDeviceKeys = result;
+    });
+  }
+
+  Future<void> _exportSelectedDataset() async {
+    if (_datasets.isEmpty || _isBusy) {
+      return;
+    }
+
+    setState(() {
+      _isExporting = true;
+    });
+
+    try {
+      final dataset = _datasets[_selectedIndex];
+      final dir = await getTemporaryDirectory();
+      final file = File(
+        path.join(
+          dir.path,
+          '动力超标_${dataset.slot.label}_${DateTime.now().millisecondsSinceEpoch}.json',
+        ),
+      );
+      final payload = Map<String, dynamic>.from(dataset.rawData);
+      payload['selectedTimeSlot'] = dataset.slot.label;
+      payload['exportedFromAppAt'] = DateTime.now().toIso8601String();
+
+      await file.writeAsString(
+        const JsonEncoder.withIndent('  ').convert(payload),
+      );
+      await Share.shareXFiles([
+        XFile(file.path),
+      ], text: '动力超标 ${dataset.slot.label} 时段数据导出');
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('导出失败: $error')));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isExporting = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _exportRandomizedDataset() async {
+    if (_datasets.isEmpty || _isBusy) {
+      return;
+    }
+
+    final range = _readRandomRangePercent();
+    if (range == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('请输入有效的浮动百分比，且不能小于 0')));
+      return;
+    }
+
+    setState(() {
+      _isExporting = true;
+    });
+
+    try {
+      final dataset = _datasets[_selectedIndex];
+      final dir = await getTemporaryDirectory();
+      final file = File(
+        path.join(
+          dir.path,
+          '动力超标_${dataset.slot.label}_随机浮动_${DateTime.now().millisecondsSinceEpoch}.json',
+        ),
+      );
+      final payload = _buildRandomizedPayload(
+        dataset,
+        downPercent: range.downPercent,
+        upPercent: range.upPercent,
+      );
+      payload['exportedFromAppAt'] = DateTime.now().toIso8601String();
+
+      await file.writeAsString(
+        const JsonEncoder.withIndent('  ').convert(payload),
+      );
+      await Share.shareXFiles(
+        [XFile(file.path)],
+        text:
+            '动力超标 ${dataset.slot.label} 随机浮动数据导出（-${range.downPercent}% / +${range.upPercent}%）',
+      );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('随机导出失败: $error')));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isExporting = false;
+        });
+      }
+    }
+  }
+
+  Widget _buildRangeInput({
+    required String label,
+    required String suffix,
+    required TextEditingController controller,
+  }) {
+    return TextField(
+      controller: controller,
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      inputFormatters: [
+        FilteringTextInputFormatter.allow(RegExp(r'^\d*\.?\d{0,2}$')),
+      ],
+      decoration: InputDecoration(
+        labelText: label,
+        suffixText: suffix,
+        border: const OutlineInputBorder(),
+        isDense: true,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dataset = _datasets.isEmpty ? null : _datasets[_selectedIndex];
+    final lockedDeviceCount = dataset == null
+        ? 0
+        : _lockedDeviceCountForDataset(dataset);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('动力超标')),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _loadError != null
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.error_outline,
+                      size: 42,
+                      color: Colors.redAccent,
+                    ),
+                    const SizedBox(height: 12),
+                    Text('时段数据加载失败\n$_loadError', textAlign: TextAlign.center),
+                    const SizedBox(height: 16),
+                    FilledButton.icon(
+                      onPressed: _loadDatasets,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('重新加载'),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          : ListView(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+              children: [
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: const [
+                        Text(
+                          '时段导出',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        SizedBox(height: 8),
+                        Text(
+                          '已接入 csv 目录下的五套电流时段数据。先选一个时段，可以导出，也可以把当前抄表页数据回写到这个时段模板。',
+                          style: TextStyle(color: Colors.black54),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                for (int index = 0; index < _datasets.length; index++) ...[
+                  Builder(
+                    builder: (context) {
+                      final entry = _datasets[index];
+                      final isSelected = _selectedIndex == index;
+                      return Card(
+                        clipBehavior: Clip.antiAlias,
+                        child: InkWell(
+                          onTap: () {
+                            setState(() {
+                              _selectedIndex = index;
+                            });
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  isSelected
+                                      ? Icons.radio_button_checked
+                                      : Icons.radio_button_off,
+                                  color: isSelected
+                                      ? Theme.of(context).colorScheme.primary
+                                      : Colors.black45,
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        '${entry.slot.label} 时段',
+                                        style: const TextStyle(
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        '房间 ${entry.roomCount} 个 · 设备 ${entry.deviceCount} 台 · 录入时间 ${_formatExportedAt(entry.exportedAt)}',
+                                        style: const TextStyle(
+                                          color: Colors.black54,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                ],
+                if (dataset != null)
+                  Card(
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.primaryContainer.withValues(alpha: 0.45),
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '当前选择: ${dataset.slot.label}',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          Text('房间数量: ${dataset.roomCount}'),
+                          Text('设备数量: ${dataset.deviceCount}'),
+                          Text('电流值数量: ${dataset.currentValueCount}'),
+                          Text(
+                            '源数据时间: ${_formatExportedAt(dataset.exportedAt)}',
+                          ),
+                          const SizedBox(height: 14),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton.tonalIcon(
+                              onPressed: _currentRoomCount == 0 || _isBusy
+                                  ? null
+                                  : _writeCurrentRoomsToSelectedSlot,
+                              icon: _isUpdatingSlot
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.save_as_outlined),
+                              label: Text(
+                                _isUpdatingSlot ? '写入中...' : '将当前抄表数据写入本时段',
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton.icon(
+                              onPressed:
+                                  widget.onApplyToCurrentRooms == null ||
+                                      dataset.roomCount == 0 ||
+                                      _isBusy
+                                  ? null
+                                  : _applySelectedSlotToCurrentRooms,
+                              icon: _isApplyingToCurrent
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(
+                                      Icons.download_for_offline_outlined,
+                                    ),
+                              label: Text(
+                                _isApplyingToCurrent
+                                    ? '覆盖中...'
+                                    : '将本时段模板覆盖到当前抄表数据',
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            '当前可写入数据：$_currentRoomCount 个房间，$_currentDeviceCount 台设备。',
+                            style: const TextStyle(
+                              color: Colors.black54,
+                              fontSize: 12,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            '当前时段模板：${dataset.roomCount} 个房间，${dataset.deviceCount} 台设备。',
+                            style: const TextStyle(
+                              color: Colors.black54,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                const SizedBox(height: 12),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          '随机浮动导出',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        const Text(
+                          '仅处理非零电流值，电压列和为 0 的电流值保持不变。浮动按百分比计算，例如 5 表示最多下浮 5% 或上浮 5%。',
+                          style: TextStyle(color: Colors.black54),
+                        ),
+                        const SizedBox(height: 14),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: dataset == null || _isBusy
+                                ? null
+                                : _openLockedDevicePage,
+                            icon: const Icon(Icons.lock_outline),
+                            label: Text(
+                              lockedDeviceCount > 0
+                                  ? '锁定设备 ($lockedDeviceCount)'
+                                  : '锁定设备',
+                            ),
+                          ),
+                        ),
+                        if (lockedDeviceCount > 0) ...[
+                          const SizedBox(height: 10),
+                          Text(
+                            '当前时段已有 $lockedDeviceCount 台设备被锁定，随机导出时这些设备不会参与随机。',
+                            style: const TextStyle(
+                              color: Colors.black54,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 14),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _buildRangeInput(
+                                label: '向下浮动',
+                                suffix: '%',
+                                controller: _downRangeCtrl,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: _buildRangeInput(
+                                label: '向上浮动',
+                                suffix: '%',
+                                controller: _upRangeCtrl,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: dataset == null || _isBusy
+                        ? null
+                        : _exportSelectedDataset,
+                    icon: _isExporting
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.ios_share_outlined),
+                    label: Text(_isExporting ? '导出中...' : '导出选中时段数据'),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: dataset == null || _isBusy
+                        ? null
+                        : _exportRandomizedDataset,
+                    icon: _isExporting
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.shuffle),
+                    label: Text(_isExporting ? '导出中...' : '随机处理后导出'),
+                  ),
+                ),
+              ],
+            ),
+    );
+  }
+}
+
+class MeterLockedDevicesPage extends StatefulWidget {
+  final MeterTimeSlotDataset dataset;
+  final Set<String> initialLockedKeys;
+
+  const MeterLockedDevicesPage({
+    super.key,
+    required this.dataset,
+    required this.initialLockedKeys,
+  });
+
+  @override
+  State<MeterLockedDevicesPage> createState() => _MeterLockedDevicesPageState();
+}
+
+class _MeterLockedDevicesPageState extends State<MeterLockedDevicesPage> {
+  late Set<String> _draftLockedKeys;
+  late final TextEditingController _searchCtrl;
+  bool _showLockedOnly = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _draftLockedKeys = Set<String>.from(widget.initialLockedKeys);
+    _searchCtrl = TextEditingController()..addListener(_handleSearchChanged);
+  }
+
+  @override
+  void dispose() {
+    _searchCtrl
+      ..removeListener(_handleSearchChanged)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _handleSearchChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  String _deviceKey(MeterRoom room, MeterDevice device) {
+    return '${widget.dataset.slot.label}::${room.roomId}::${device.name}';
+  }
+
+  bool _isLocked(MeterRoom room, MeterDevice device) {
+    return _draftLockedKeys.contains(_deviceKey(room, device));
+  }
+
+  bool _matchesQuery(MeterRoom room, MeterDevice device) {
+    final query = _searchCtrl.text.trim().toLowerCase();
+    if (query.isEmpty) {
+      return true;
+    }
+    final haystack =
+        '${room.roomName} ${room.location} ${room.roomType} ${device.name}'
+            .toLowerCase();
+    return haystack.contains(query);
+  }
+
+  List<MeterDevice> _visibleDevicesForRoom(MeterRoom room) {
+    return room.devices.where((device) {
+      if (_showLockedOnly && !_isLocked(room, device)) {
+        return false;
+      }
+      return _matchesQuery(room, device);
+    }).toList();
+  }
+
+  int _lockedCountForRoom(MeterRoom room) {
+    return room.devices.where((device) => _isLocked(room, device)).length;
+  }
+
+  int _visibleLockedCountForRoom(MeterRoom room) {
+    return _visibleDevicesForRoom(
+      room,
+    ).where((device) => _isLocked(room, device)).length;
+  }
+
+  int get _totalDeviceCount => widget.dataset.deviceCount;
+
+  int get _lockedDeviceCount {
+    var count = 0;
+    for (final room in widget.dataset.rooms) {
+      count += _lockedCountForRoom(room);
+    }
+    return count;
+  }
+
+  int get _visibleDeviceCount {
+    var count = 0;
+    for (final room in widget.dataset.rooms) {
+      count += _visibleDevicesForRoom(room).length;
+    }
+    return count;
+  }
+
+  void _setDeviceLocked(MeterRoom room, MeterDevice device, bool locked) {
+    final key = _deviceKey(room, device);
+    setState(() {
+      if (locked) {
+        _draftLockedKeys.add(key);
+      } else {
+        _draftLockedKeys.remove(key);
+      }
+    });
+  }
+
+  void _setDevicesLocked(
+    Iterable<MapEntry<MeterRoom, MeterDevice>> targets,
+    bool locked,
+  ) {
+    setState(() {
+      for (final entry in targets) {
+        final key = _deviceKey(entry.key, entry.value);
+        if (locked) {
+          _draftLockedKeys.add(key);
+        } else {
+          _draftLockedKeys.remove(key);
+        }
+      }
+    });
+  }
+
+  Iterable<MapEntry<MeterRoom, MeterDevice>> _visibleEntries() sync* {
+    for (final room in widget.dataset.rooms) {
+      for (final device in _visibleDevicesForRoom(room)) {
+        yield MapEntry(room, device);
+      }
+    }
+  }
+
+  void _lockAllVisible() {
+    _setDevicesLocked(_visibleEntries(), true);
+  }
+
+  void _unlockAllVisible() {
+    _setDevicesLocked(_visibleEntries(), false);
+  }
+
+  void _clearCurrentSlotLocks() {
+    setState(() {
+      for (final room in widget.dataset.rooms) {
+        for (final device in room.devices) {
+          _draftLockedKeys.remove(_deviceKey(room, device));
+        }
+      }
+    });
+  }
+
+  void _setRoomVisibleDevicesLocked(MeterRoom room, bool locked) {
+    final entries = _visibleDevicesForRoom(
+      room,
+    ).map((device) => MapEntry(room, device));
+    _setDevicesLocked(entries, locked);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final visibleRooms = widget.dataset.rooms
+        .where((room) => _visibleDevicesForRoom(room).isNotEmpty)
+        .toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('锁定设备 - ${widget.dataset.slot.label}'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, _draftLockedKeys),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+      bottomNavigationBar: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+          child: Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('取消'),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: FilledButton(
+                  onPressed: () => Navigator.pop(context, _draftLockedKeys),
+                  child: const Text('保存锁定'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+            child: Column(
+              children: [
+                TextField(
+                  controller: _searchCtrl,
+                  decoration: InputDecoration(
+                    hintText: '搜索房间名、位置或设备名',
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: _searchCtrl.text.trim().isEmpty
+                        ? null
+                        : IconButton(
+                            onPressed: _searchCtrl.clear,
+                            icon: const Icon(Icons.close),
+                          ),
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '当前时段：${widget.dataset.slot.label}',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          '已锁定 $_lockedDeviceCount / $_totalDeviceCount 台设备，当前筛选显示 $_visibleDeviceCount 台。',
+                          style: const TextStyle(color: Colors.black54),
+                        ),
+                        const SizedBox(height: 12),
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 10,
+                          children: [
+                            FilterChip(
+                              selected: _showLockedOnly,
+                              onSelected: (value) {
+                                setState(() {
+                                  _showLockedOnly = value;
+                                });
+                              },
+                              label: const Text('仅看已锁定'),
+                            ),
+                            OutlinedButton.icon(
+                              onPressed: _visibleDeviceCount == 0
+                                  ? null
+                                  : _lockAllVisible,
+                              icon: const Icon(Icons.lock),
+                              label: const Text('锁定当前筛选'),
+                            ),
+                            OutlinedButton.icon(
+                              onPressed: _visibleDeviceCount == 0
+                                  ? null
+                                  : _unlockAllVisible,
+                              icon: const Icon(Icons.lock_open),
+                              label: const Text('解锁当前筛选'),
+                            ),
+                            TextButton(
+                              onPressed: _lockedDeviceCount == 0
+                                  ? null
+                                  : _clearCurrentSlotLocks,
+                              child: const Text('清空本时段锁定'),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Expanded(
+            child: visibleRooms.isEmpty
+                ? const Center(
+                    child: Text(
+                      '当前没有匹配到设备\n可以试试清空搜索或关闭“仅看已锁定”',
+                      textAlign: TextAlign.center,
+                    ),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                    itemCount: visibleRooms.length,
+                    itemBuilder: (context, index) {
+                      final room = visibleRooms[index];
+                      final visibleDevices = _visibleDevicesForRoom(room);
+                      final roomLockedCount = _lockedCountForRoom(room);
+                      final visibleLockedCount = _visibleLockedCountForRoom(
+                        room,
+                      );
+
+                      return Card(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          room.roomName,
+                                          style: const TextStyle(
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          '${room.location} · 当前显示 ${visibleDevices.length}/${room.devices.length} 台 · 已锁定 $roomLockedCount 台',
+                                          style: const TextStyle(
+                                            color: Colors.black54,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Column(
+                                    children: [
+                                      OutlinedButton(
+                                        onPressed: visibleDevices.isEmpty
+                                            ? null
+                                            : () =>
+                                                  _setRoomVisibleDevicesLocked(
+                                                    room,
+                                                    true,
+                                                  ),
+                                        child: const Text('本房全锁'),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      OutlinedButton(
+                                        onPressed: visibleLockedCount == 0
+                                            ? null
+                                            : () =>
+                                                  _setRoomVisibleDevicesLocked(
+                                                    room,
+                                                    false,
+                                                  ),
+                                        child: const Text('本房解锁'),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              const Divider(height: 1),
+                              const SizedBox(height: 4),
+                              for (final device in visibleDevices)
+                                SwitchListTile.adaptive(
+                                  value: _isLocked(room, device),
+                                  onChanged: (value) =>
+                                      _setDeviceLocked(room, device, value),
+                                  title: Text(device.name),
+                                  subtitle: Text(
+                                    _isLocked(room, device)
+                                        ? '已锁定，随机导出时保持原值'
+                                        : '未锁定，会参与随机处理',
+                                  ),
+                                  contentPadding: EdgeInsets.zero,
+                                ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class MeterDetailPage extends StatefulWidget {
   final MeterRoom room;
   final List<CameraDescription> cameras;
+  final bool defaultIncomingCabinetOnlineOcrEnabled;
   final Future<void> Function() onChanged;
   const MeterDetailPage({
     super.key,
     required this.room,
     required this.cameras,
+    required this.defaultIncomingCabinetOnlineOcrEnabled,
     required this.onChanged,
   });
 
@@ -3646,18 +9803,21 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
     0.56,
     0.36,
   );
-  static const Rect _incomingCabinetRectNormalized = Rect.fromLTWH(
-    0.28,
-    0.22,
-    0.44,
-    0.48,
+  static const Rect _singleLineOcrFocusRectNormalized = Rect.fromLTWH(
+    0.12,
+    0.43,
+    0.76,
+    0.14,
   );
 
   static const String _baiduAppId = '7473614';
   static const String _baiduApiKey = 'GOiAIygVECnMVJWnpQGcBbNs';
   static const String _baiduSecretKey = 's7nnGZ9mhNv8in2b7eyjm0g3zjrhXUqv';
+  static const String _baiduMeterOcrEndpoint =
+      'https://aip.baidubce.com/rest/2.0/ocr/v1/meter';
 
   OcrMode _ocrMode = OcrMode.local;
+  bool _ocrModeManuallySelected = false;
   String? _baiduAccessToken;
   DateTime? _baiduTokenExpireAt;
 
@@ -4151,11 +10311,70 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
     }
   }
 
-  bool _isIncomingCabinetDevice(MeterDevice device) {
+  bool _containsUpsKeyword(String name) {
+    return name.trim().toLowerCase().contains('ups');
+  }
+
+  bool _isIncomingCabinetDeviceAt(int deviceIndex) {
+    if (deviceIndex < 0 || deviceIndex >= widget.room.devices.length) {
+      return false;
+    }
+
+    final device = widget.room.devices[deviceIndex];
     final name = device.name.trim().toLowerCase();
-    return name.contains('进线柜') ||
+    if (name.contains('进线柜') ||
         name.contains('incoming') ||
-        name.contains('feeder');
+        name.contains('feeder')) {
+      return true;
+    }
+    if (_containsUpsKeyword(device.name)) {
+      return false;
+    }
+
+    final nonUpsDevices = widget.room.devices
+        .where((entry) {
+          final entryName = entry.name.trim();
+          if (entryName.isEmpty) {
+            return false;
+          }
+          return !_containsUpsKeyword(entryName);
+        })
+        .toList(growable: false);
+
+    return nonUpsDevices.length >= 2 &&
+        nonUpsDevices.length <= 3 &&
+        nonUpsDevices.contains(device);
+  }
+
+  bool _isTransformerDeviceAt(int deviceIndex) {
+    if (deviceIndex < 0 || deviceIndex >= widget.room.devices.length) {
+      return false;
+    }
+
+    final device = widget.room.devices[deviceIndex];
+    final source =
+        '${device.name} ${widget.room.roomName} ${widget.room.roomType}'
+            .toLowerCase();
+    return source.contains('变压') || source.contains('transformer');
+  }
+
+  OcrMode _resolvedOcrModeForDevice(int deviceIndex) {
+    if (_ocrModeManuallySelected) {
+      return _ocrMode;
+    }
+    if (widget.defaultIncomingCabinetOnlineOcrEnabled &&
+        _isIncomingCabinetDeviceAt(deviceIndex)) {
+      return OcrMode.online;
+    }
+    return OcrMode.local;
+  }
+
+  String get _ocrModeChipLabel {
+    if (!_ocrModeManuallySelected &&
+        widget.defaultIncomingCabinetOnlineOcrEnabled) {
+      return '自动';
+    }
+    return _ocrMode == OcrMode.online ? '在线' : '本地';
   }
 
   Future<String> _recognizeTextWithLocalOcr(
@@ -4242,22 +10461,26 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
     final bytes = await File(imagePath).readAsBytes();
     final imageBase64 = base64Encode(bytes);
 
-    final uri = Uri.parse(
-      'https://aip.baidubce.com/rest/2.0/ocr/v1/general_basic?access_token=$token',
-    );
+    final uri = Uri.parse('$_baiduMeterOcrEndpoint?access_token=$token');
     final response = await http.post(
       uri,
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: {'image': imageBase64, 'language_type': 'CHN_ENG'},
+      body: {
+        'image': imageBase64,
+        'probability': 'false',
+        'poly_location': 'false',
+      },
     );
 
     if (response.statusCode != 200) {
-      throw Exception('百度 OCR 请求失败(${response.statusCode})');
+      throw Exception('百度仪表 OCR 请求失败(${response.statusCode})');
     }
 
     final data = jsonDecode(response.body) as Map<String, dynamic>;
     if (data['error_code'] != null) {
-      throw Exception('百度 OCR 错误: ${data['error_msg'] ?? data['error_code']}');
+      throw Exception(
+        '百度仪表 OCR 错误: ${data['error_msg'] ?? data['error_code']}',
+      );
     }
 
     final wordsResult = data['words_result'];
@@ -4289,12 +10512,18 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
       return;
     }
 
+    final isTransformer = _isTransformerDeviceAt(deviceIndex);
+    final focusRect = isTransformer
+        ? _ocrFocusRectNormalized
+        : _singleLineOcrFocusRectNormalized;
     final XFile? photo = await Navigator.push<XFile?>(
       context,
       buildAppRoute(
-        MeterOcrCameraPage(
+        page: MeterOcrCameraPage(
           camera: widget.cameras.first,
           title: widget.room.devices[deviceIndex].name,
+          focusRectNormalized: focusRect,
+          isSingleLineRecognition: !isTransformer,
         ),
       ),
     );
@@ -4302,12 +10531,8 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
     if (photo == null) return;
 
     try {
-      final isIncoming = _isIncomingCabinetDevice(
-        widget.room.devices[deviceIndex],
-      );
-      final focusRect = isIncoming
-          ? _incomingCabinetRectNormalized
-          : _ocrFocusRectNormalized;
+      final isIncoming = _isIncomingCabinetDeviceAt(deviceIndex);
+      final resolvedMode = _resolvedOcrModeForDevice(deviceIndex);
 
       final croppedPath = await _buildCroppedImageFilePath(
         photo.path,
@@ -4315,7 +10540,7 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
       );
       final targetPath = croppedPath ?? photo.path;
 
-      final text = _ocrMode == OcrMode.online
+      final text = resolvedMode == OcrMode.online
           ? await _recognizeTextWithBaiduOcr(targetPath)
           : await _recognizeTextWithLocalOcr(targetPath, photo.path);
 
@@ -4349,7 +10574,9 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
 
       await widget.onChanged();
       if (!mounted) return;
-      final modeLabel = _ocrMode == OcrMode.online ? '在线(百度)' : '本地(MLKit)';
+      final modeLabel = resolvedMode == OcrMode.online
+          ? '在线(百度仪表OCR)'
+          : '本地(MLKit)';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -4459,20 +10686,43 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
       appBar: AppBar(
         title: Text('抄表 - ${widget.room.roomName}'),
         actions: [
-          PopupMenuButton<OcrMode>(
+          PopupMenuButton<String>(
             tooltip: 'OCR 模式切换',
             onSelected: (mode) {
-              setState(() => _ocrMode = mode);
-              final label = mode == OcrMode.online ? '在线(百度 OCR)' : '本地(MLKit)';
+              if (mode == 'auto') {
+                setState(() {
+                  _ocrMode = OcrMode.local;
+                  _ocrModeManuallySelected = false;
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('已切换到自动模式：进线柜默认在线 OCR，其它设备默认本地 OCR'),
+                  ),
+                );
+                return;
+              }
+
+              final selectedMode = mode == 'online'
+                  ? OcrMode.online
+                  : OcrMode.local;
+              setState(() {
+                _ocrMode = selectedMode;
+                _ocrModeManuallySelected = true;
+              });
+              final label = selectedMode == OcrMode.online
+                  ? '在线(百度仪表 OCR)'
+                  : '本地(MLKit)';
               ScaffoldMessenger.of(
                 context,
               ).showSnackBar(SnackBar(content: Text('已切换到$label')));
             },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: OcrMode.local, child: Text('本地模式 (MLKit)')),
-              PopupMenuItem(
-                value: OcrMode.online,
-                child: Text('在线模式 (百度 OCR)'),
+            itemBuilder: (_) => <PopupMenuEntry<String>>[
+              if (widget.defaultIncomingCabinetOnlineOcrEnabled)
+                const PopupMenuItem(value: 'auto', child: Text('自动模式 (进线柜在线)')),
+              const PopupMenuItem(value: 'local', child: Text('本地模式 (MLKit)')),
+              const PopupMenuItem(
+                value: 'online',
+                child: Text('在线模式 (百度仪表 OCR)'),
               ),
             ],
             child: Container(
@@ -4487,7 +10737,7 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
                 children: [
                   const Icon(Icons.cloud_sync_outlined, size: 18),
                   const SizedBox(width: 6),
-                  Text(_ocrMode == OcrMode.online ? '在线' : '本地'),
+                  Text(_ocrModeChipLabel),
                 ],
               ),
             ),
@@ -4650,10 +10900,14 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
 class MeterOcrCameraPage extends StatefulWidget {
   final CameraDescription camera;
   final String title;
+  final Rect focusRectNormalized;
+  final bool isSingleLineRecognition;
   const MeterOcrCameraPage({
     super.key,
     required this.camera,
     required this.title,
+    required this.focusRectNormalized,
+    required this.isSingleLineRecognition,
   });
 
   @override
@@ -4738,10 +10992,11 @@ class _MeterOcrCameraPageState extends State<MeterOcrCameraPage> {
               builder: (context, constraints) {
                 final w = constraints.maxWidth;
                 final h = constraints.maxHeight;
-                final left = w * 0.22;
-                final top = h * 0.32;
-                final rectW = w * 0.56;
-                final rectH = h * 0.36;
+                final focusRect = widget.focusRectNormalized;
+                final left = w * focusRect.left;
+                final top = h * focusRect.top;
+                final rectW = w * focusRect.width;
+                final rectH = h * focusRect.height;
 
                 return Stack(
                   children: [
@@ -4779,9 +11034,12 @@ class _MeterOcrCameraPageState extends State<MeterOcrCameraPage> {
                           color: Colors.black54,
                           borderRadius: BorderRadius.circular(8),
                         ),
-                        child: const Text(
-                          '识别区域',
-                          style: TextStyle(color: Colors.white, fontSize: 12),
+                        child: Text(
+                          widget.isSingleLineRecognition ? '单行识别区域' : '识别区域',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                          ),
                         ),
                       ),
                     ),
@@ -4798,10 +11056,12 @@ class _MeterOcrCameraPageState extends State<MeterOcrCameraPage> {
                           color: Colors.black54,
                           borderRadius: BorderRadius.circular(12),
                         ),
-                        child: const Text(
-                          '将“电流 A/B/C + 单位 A”放入绿色框内，尽量只拍屏幕数据区',
+                        child: Text(
+                          widget.isSingleLineRecognition
+                              ? '将需要识别的一行电流数据放入绿色框内，避免拍入其它数值'
+                              : '将“电流 A/B/C + 单位 A”放入绿色框内，尽量只拍屏幕数据区',
                           textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.white),
+                          style: const TextStyle(color: Colors.white),
                         ),
                       ),
                     ),
@@ -4826,10 +11086,12 @@ class _MeterOcrCameraPageState extends State<MeterOcrCameraPage> {
 class _FloorChip extends StatelessWidget {
   final String label;
   final bool selected;
+  final int selectionPulse;
   final VoidCallback onTap;
   const _FloorChip({
     required this.label,
     required this.selected,
+    required this.selectionPulse,
     required this.onTap,
   });
   @override
@@ -4838,26 +11100,277 @@ class _FloorChip extends StatelessWidget {
     child: InkWell(
       borderRadius: BorderRadius.circular(16),
       onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
+      child: TweenAnimationBuilder<double>(
+        key: ValueKey('floor-chip-$label-$selected-$selectionPulse'),
+        tween: Tween(begin: 0, end: 1),
+        duration: const Duration(milliseconds: 340),
         curve: Curves.easeOutCubic,
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-        decoration: BoxDecoration(
-          color: selected
-              ? Theme.of(context).colorScheme.primary
-              : Colors.white,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: selected ? Colors.white : Colors.black54,
-            fontWeight: FontWeight.bold,
+        builder: (context, value, child) {
+          final pulseCurve = selected
+              ? Curves.easeOutBack.transform(value)
+              : Curves.easeOut.transform(value);
+          return Transform.translate(
+            offset: Offset(0, ui.lerpDouble(5, 0, pulseCurve)!),
+            child: Transform.scale(
+              scale: selected
+                  ? ui.lerpDouble(0.94, 1.0, pulseCurve)!
+                  : ui.lerpDouble(0.98, 1.0, pulseCurve)!,
+              child: child,
+            ),
+          );
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+          decoration: BoxDecoration(
+            color: selected
+                ? Theme.of(context).colorScheme.primary
+                : Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: selected
+                  ? Theme.of(
+                      context,
+                    ).colorScheme.primary.withValues(alpha: 0.14)
+                  : Colors.black.withValues(alpha: 0.05),
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.white : Colors.black54,
+              fontWeight: FontWeight.bold,
+            ),
           ),
         ),
       ),
     ),
   );
+}
+
+class _AnimatedFloorFilterBar extends StatefulWidget {
+  final List<String> labels;
+  final String selectedLabel;
+  final int selectionPulse;
+  final ValueChanged<String> onSelect;
+
+  const _AnimatedFloorFilterBar({
+    required this.labels,
+    required this.selectedLabel,
+    required this.selectionPulse,
+    required this.onSelect,
+  });
+
+  @override
+  State<_AnimatedFloorFilterBar> createState() =>
+      _AnimatedFloorFilterBarState();
+}
+
+class _AnimatedFloorFilterBarState extends State<_AnimatedFloorFilterBar>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late String _labelsSignature;
+
+  @override
+  void initState() {
+    super.initState();
+    _labelsSignature = _buildSignature(widget.labels);
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 520),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _controller.forward(from: 0);
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _AnimatedFloorFilterBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final nextSignature = _buildSignature(widget.labels);
+    if (nextSignature != _labelsSignature ||
+        oldWidget.selectedLabel != widget.selectedLabel ||
+        oldWidget.selectionPulse != widget.selectionPulse) {
+      _labelsSignature = nextSignature;
+      _controller.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  String _buildSignature(List<String> labels) => labels.join('|');
+
+  @override
+  Widget build(BuildContext context) {
+    final labels = widget.labels;
+    final containerCurve = CurvedAnimation(
+      parent: _controller,
+      curve: const Interval(0.0, 0.68, curve: Curves.easeOutCubic),
+    );
+
+    return AnimatedSize(
+      duration: const Duration(milliseconds: 320),
+      curve: Curves.easeOutCubic,
+      alignment: Alignment.topCenter,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 260),
+        reverseDuration: const Duration(milliseconds: 180),
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+        transitionBuilder: (child, animation) {
+          return FadeTransition(
+            opacity: animation,
+            child: SizeTransition(
+              sizeFactor: animation,
+              axisAlignment: -1,
+              child: child,
+            ),
+          );
+        },
+        child: labels.isEmpty
+            ? const SizedBox.shrink()
+            : FadeTransition(
+                key: ValueKey(_labelsSignature),
+                opacity: containerCurve,
+                child: SlideTransition(
+                  position: Tween<Offset>(
+                    begin: const Offset(0, 0.22),
+                    end: Offset.zero,
+                  ).animate(containerCurve),
+                  child: Container(
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(18),
+                      border: Border.all(
+                        color: Colors.black.withValues(alpha: 0.05),
+                      ),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(18),
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        physics: const BouncingScrollPhysics(),
+                        padding: const EdgeInsets.fromLTRB(8, 2, 6, 2),
+                        child: Row(
+                          children: [
+                            for (int index = 0; index < labels.length; index++)
+                              _AnimatedFloorFilterChip(
+                                animation: _controller,
+                                index: index,
+                                total: labels.length,
+                                child: _FloorChip(
+                                  label: labels[index],
+                                  selected:
+                                      widget.selectedLabel == labels[index],
+                                  selectionPulse: widget.selectionPulse,
+                                  onTap: () => widget.onSelect(labels[index]),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+      ),
+    );
+  }
+}
+
+class _AnimatedFloorFilterChip extends StatelessWidget {
+  final Animation<double> animation;
+  final int index;
+  final int total;
+  final Widget child;
+
+  const _AnimatedFloorFilterChip({
+    required this.animation,
+    required this.index,
+    required this.total,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final safeTotal = total <= 0 ? 1 : total;
+    final perItemWindow = math.min(0.11, 0.42 / safeTotal);
+    final start = (0.12 + index * 0.055).clamp(0.0, 0.78);
+    final end = (start + 0.22 + perItemWindow).clamp(start + 0.01, 1.0);
+    final curved = CurvedAnimation(
+      parent: animation,
+      curve: Interval(start, end, curve: Curves.easeOutBack),
+    );
+
+    return FadeTransition(
+      opacity: curved,
+      child: SlideTransition(
+        position: Tween<Offset>(
+          begin: const Offset(0.08, 0.26),
+          end: Offset.zero,
+        ).animate(curved),
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.92, end: 1.0).animate(curved),
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+class _FilterReveal extends StatelessWidget {
+  final int pulse;
+  final int index;
+  final Widget child;
+
+  const _FilterReveal({
+    required this.pulse,
+    required this.index,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (pulse <= 0) {
+      return child;
+    }
+
+    final clampedIndex = index.clamp(0, 7);
+    final start = (clampedIndex * 0.075).clamp(0.0, 0.42).toDouble();
+
+    return TweenAnimationBuilder<double>(
+      key: ValueKey('filter-reveal-$pulse-$index'),
+      tween: Tween(begin: 0, end: 1),
+      duration: Duration(milliseconds: 560 + clampedIndex * 32),
+      curve: Curves.easeOutCubic,
+      child: child,
+      builder: (context, value, child) {
+        final normalized = ((value - start) / (1 - start)).clamp(0.0, 1.0);
+        final fadeProgress = Curves.easeOut.transform(normalized);
+        final motionProgress = Curves.easeOutBack.transform(normalized);
+
+        return Opacity(
+          opacity: ui.lerpDouble(0.0, 1.0, fadeProgress)!,
+          child: Transform.translate(
+            offset: Offset(0, ui.lerpDouble(22, 0, motionProgress)!),
+            child: Transform.scale(
+              scale: ui.lerpDouble(0.9, 1.0, motionProgress)!,
+              alignment: Alignment.center,
+              child: child,
+            ),
+          ),
+        );
+      },
+    );
+  }
 }
 
 class _TabButton extends StatelessWidget {
@@ -5027,38 +11540,129 @@ class CameraPage extends StatefulWidget {
   final CameraDescription camera;
   final String title;
   final int captureCount;
+  final bool allowContinuousCapture;
+  final String roomCode;
+  final String initialWatermarkLocation;
+  final String weatherText;
+  final String imprintText;
+  final bool enableCameraAttachDelay;
+  final int cameraAttachDelayMs;
+  final bool initialWatermarkEnabled;
+  final Future<void> Function(bool value)? onWatermarkPreferenceChanged;
+  final Future<void> Function(CameraCaptureResult capture, int captureIndex)?
+  onCaptureProcessed;
   const CameraPage({
     super.key,
     required this.camera,
     required this.title,
     required this.captureCount,
+    this.allowContinuousCapture = false,
+    required this.roomCode,
+    required this.initialWatermarkLocation,
+    required this.weatherText,
+    required this.imprintText,
+    required this.enableCameraAttachDelay,
+    required this.cameraAttachDelayMs,
+    required this.initialWatermarkEnabled,
+    this.onWatermarkPreferenceChanged,
+    this.onCaptureProcessed,
   });
   @override
   State<CameraPage> createState() => _CameraPageState();
 }
 
 class _CameraPageState extends State<CameraPage> {
+  static const Duration _finalCaptureReturnDelay = Duration(milliseconds: 140);
+  static const String _defaultWatermarkEnabledPreferenceKey =
+      'default_watermark_enabled';
+  static const String _cachedCaptureWeatherTextPreferenceKey =
+      'cached_capture_weather_text';
+  static const String _lastWeatherRefreshSlotPreferenceKey =
+      'last_weather_refresh_slot';
+  static const String _continuousCaptureRoomCodePlaceholder = '点击填写备注';
+
   CameraController? _controller;
+  NativeWatermarkCameraPreviewController? _nativePreviewController;
+  NativeWatermarkPreviewState? _nativeWatermarkState;
+  Animation<double>? _routeAnimation;
+  int _cameraStartScheduleToken = 0;
   bool _isReady = false;
+  bool _isRefreshingNativeAddress = false;
+  bool _isRefreshingNativeWeather = false;
+  bool _cameraSessionStarted = false;
+  bool _attachNativePreview = false;
+  bool _pendingCloseAfterEnter = false;
+  bool _isClosing = false;
+  bool _allowSystemPop = false;
+  bool _isCapturing = false;
+  late bool _watermarkEnabled;
+  late String _currentRoomCode;
+  late String _currentLocation;
   int _captured = 0;
-  final List<XFile> _photos = [];
+  final List<CameraCaptureResult> _photos = [];
+  Timer? _previewTicker;
+  Timer? _weatherSlotRefreshTicker;
+  Watermark118Data? _previewData;
+  late String _currentWeatherText;
+  String _currentWeatherSlotKey = '';
+  bool _isAutoRefreshingWeatherSlot = false;
+
+  bool get _useNativePreview => Platform.isAndroid;
+
+  Duration get _cameraAttachDelay {
+    if (!widget.enableCameraAttachDelay || widget.cameraAttachDelayMs <= 0) {
+      return Duration.zero;
+    }
+    return Duration(milliseconds: widget.cameraAttachDelayMs);
+  }
+
   @override
   void initState() {
     super.initState();
-    _initCamera();
+    _watermarkEnabled = widget.initialWatermarkEnabled;
+    _currentRoomCode = widget.roomCode.trim();
+    _currentLocation = widget.initialWatermarkLocation.trim();
+    _currentWeatherText = widget.weatherText.trim().isNotEmpty
+        ? widget.weatherText.trim()
+        : WatermarkTemplate118Composer.defaultWeatherText;
+    if (_watermarkEnabled) {
+      _previewData = _buildPreviewData(captureTime: DateTime.now());
+    }
+    _startWeatherSlotRefreshTicker();
+    unawaited(_syncWeatherForCurrentSlot());
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final routeAnimation = ModalRoute.of(context)?.animation;
+    if (_routeAnimation == routeAnimation) {
+      return;
+    }
+    _routeAnimation?.removeStatusListener(_handleRouteAnimationStatusChanged);
+    _routeAnimation = routeAnimation;
+    _routeAnimation?.addStatusListener(_handleRouteAnimationStatusChanged);
+
+    if (routeAnimation == null ||
+        routeAnimation.status == AnimationStatus.completed) {
+      _scheduleCameraStartAfterEnter();
+    }
   }
 
   Future<void> _initCamera() async {
-    _controller = CameraController(
+    final controller = CameraController(
       widget.camera,
       ResolutionPreset.high,
       enableAudio: false,
     );
+    _controller = controller;
     try {
-      // 延迟初始化以保证页面转场流畅
-      await Future.delayed(const Duration(milliseconds: 300));
-      await _controller!.initialize();
-      if (mounted) setState(() => _isReady = true);
+      await controller.initialize();
+      if (!mounted || _isClosing || _controller != controller) {
+        await controller.dispose();
+        return;
+      }
+      setState(() => _isReady = true);
     } catch (e) {
       debugPrint('Camera init error: $e');
     }
@@ -5066,98 +11670,1358 @@ class _CameraPageState extends State<CameraPage> {
 
   @override
   void dispose() {
-    _controller?.dispose();
+    _routeAnimation?.removeStatusListener(_handleRouteAnimationStatusChanged);
+    _previewTicker?.cancel();
+    _weatherSlotRefreshTicker?.cancel();
+    _nativePreviewController?.dispose();
+    final controller = _controller;
+    _controller = null;
+    if (controller != null) {
+      unawaited(controller.dispose());
+    }
     super.dispose();
   }
 
-  Future<void> _onShoot() async {
-    if (!_isReady || _controller == null) return;
-    try {
-      final image = await _controller!.takePicture();
-      _photos.add(image);
-      _captured++;
-      if (!mounted) return;
-      OverlayEntry entry = OverlayEntry(
-        builder: (context) => Center(
-          child: Material(
-            color: Colors.transparent,
-            child: Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: Colors.black87,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.check_circle, color: Colors.green, size: 50),
-                  const SizedBox(height: 10),
-                  Text(
-                    widget.captureCount > 1
-                        ? '第 $_captured / ${widget.captureCount} 张'
-                        : '拍照成功',
-                    style: const TextStyle(color: Colors.white, fontSize: 18),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      );
-      Overlay.of(context).insert(entry);
-      await Future.delayed(const Duration(milliseconds: 800));
-      entry.remove();
-      if (!mounted) return;
-      if (_captured >= widget.captureCount)
-        Navigator.pop(context, _photos);
-      else
-        setState(() {});
-    } catch (e) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('拍照失败: $e')));
+  void _handleRouteAnimationStatusChanged(AnimationStatus status) {
+    if (status != AnimationStatus.completed || !mounted) {
+      return;
+    }
+    if (_pendingCloseAfterEnter) {
+      _pendingCloseAfterEnter = false;
+      unawaited(_handleCloseRequested());
+      return;
+    }
+    _scheduleCameraStartAfterEnter();
+  }
+
+  void _scheduleCameraStartAfterEnter() {
+    final int scheduleToken = ++_cameraStartScheduleToken;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      unawaited(_startCameraSessionAfterDelay(scheduleToken));
+    });
+  }
+
+  Future<void> _startCameraSessionAfterDelay(int scheduleToken) async {
+    final delay = _cameraAttachDelay;
+    if (delay > Duration.zero) {
+      await Future<void>.delayed(delay);
+    }
+    if (!mounted ||
+        _isClosing ||
+        _pendingCloseAfterEnter ||
+        scheduleToken != _cameraStartScheduleToken) {
+      return;
+    }
+    _startCameraSessionIfNeeded();
+  }
+
+  void _startPreviewClockIfNeeded() {
+    if (_useNativePreview || !_watermarkEnabled || _previewTicker != null) {
+      return;
+    }
+    _previewData = _buildPreviewData();
+    _previewTicker = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _refreshPreviewClock(),
+    );
+  }
+
+  void _stopPreviewClock() {
+    _previewTicker?.cancel();
+    _previewTicker = null;
+  }
+
+  String _resolvedCurrentWeatherText() {
+    final value = _currentWeatherText.trim();
+    if (value.isNotEmpty) {
+      return value;
+    }
+    return WatermarkTemplate118Composer.defaultWeatherText;
+  }
+
+  String _resolvedWeatherFallbackAddress() {
+    final nativeLocation = _nativeWatermarkState?.location.trim() ?? '';
+    if (nativeLocation.isNotEmpty) {
+      return nativeLocation;
+    }
+    final previewLocation = _previewData?.location.trim() ?? '';
+    if (previewLocation.isNotEmpty) {
+      return previewLocation;
+    }
+    return widget.initialWatermarkLocation;
+  }
+
+  String _resolvedCurrentRoomCode() {
+    final value = _currentRoomCode.trim();
+    if (value.isNotEmpty) {
+      return value;
+    }
+    return widget.roomCode;
+  }
+
+  String _resolvedCurrentLocation() {
+    final value = _currentLocation.trim();
+    if (value.isNotEmpty) {
+      return value;
+    }
+    return widget.initialWatermarkLocation;
+  }
+
+  bool _isPreviewPlaceholderRoomCode(String value) {
+    return widget.allowContinuousCapture &&
+        value.trim() == _continuousCaptureRoomCodePlaceholder;
+  }
+
+  String _roomCodeForPreview() {
+    final value = _resolvedCurrentRoomCode().trim();
+    if (value.isNotEmpty) {
+      return value;
+    }
+    if (widget.allowContinuousCapture) {
+      return _continuousCaptureRoomCodePlaceholder;
+    }
+    return widget.roomCode;
+  }
+
+  void _startWeatherSlotRefreshTicker() {
+    _weatherSlotRefreshTicker?.cancel();
+    _weatherSlotRefreshTicker = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => unawaited(_syncWeatherForCurrentSlot()),
+    );
+  }
+
+  Future<void> _persistWeatherRefreshCache(
+    String weatherText,
+    String slotKey,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_cachedCaptureWeatherTextPreferenceKey, weatherText);
+    await prefs.setString(_lastWeatherRefreshSlotPreferenceKey, slotKey);
+  }
+
+  Future<String?> _resolveLatestWeatherText({
+    required bool requestPermission,
+    bool showNoLocationMessage = false,
+  }) async {
+    if (requestPermission) {
+      if (!await _ensureNativeLocationPermission('天气')) {
+        return null;
+      }
+    } else {
+      final status = await Permission.location.status;
+      if (!status.isGranted) {
+        return null;
+      }
+    }
+
+    final fallbackWeatherText = _resolvedCurrentWeatherText();
+    final snapshot = await CaptureLocationService.resolveSnapshot(
+      fallbackAddress: _resolvedWeatherFallbackAddress(),
+    );
+    if (snapshot.position == null) {
+      if (showNoLocationMessage && mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('未获取到定位，天气保持不变')));
+      }
+      return null;
+    }
+
+    final weatherText = await CaptureWeatherService.resolveCurrentWeather(
+      fallbackWeatherText: fallbackWeatherText,
+      position: snapshot.position,
+    );
+    return weatherText.trim().isNotEmpty
+        ? weatherText.trim()
+        : fallbackWeatherText;
+  }
+
+  Future<void> _applyWeatherText(
+    String weatherText, {
+    bool silent = true,
+  }) async {
+    final normalized = weatherText.trim().isNotEmpty
+        ? weatherText.trim()
+        : _resolvedCurrentWeatherText();
+    final currentPreview = _previewData;
+    final shouldRebuildPreview = currentPreview != null || !_useNativePreview;
+
+    if (mounted) {
+      setState(() {
+        _currentWeatherText = normalized;
+        if (shouldRebuildPreview) {
+          _previewData = _buildPreviewData(
+            captureTime: currentPreview?.captureTime ?? DateTime.now(),
+            antiFakeCode: currentPreview?.antiFakeCode,
+            location: currentPreview?.location,
+            weatherText: normalized,
+          );
+        }
+      });
+    } else {
+      _currentWeatherText = normalized;
+      if (shouldRebuildPreview) {
+        _previewData = _buildPreviewData(
+          captureTime: currentPreview?.captureTime ?? DateTime.now(),
+          antiFakeCode: currentPreview?.antiFakeCode,
+          location: currentPreview?.location,
+          weatherText: normalized,
+        );
+      }
+    }
+
+    final nativeState = _nativeWatermarkState;
+    if (_useNativePreview &&
+        nativeState != null &&
+        nativeState.weatherText != normalized) {
+      await _updateNativeWatermarkState(<String, dynamic>{
+        'weatherText': normalized,
+      }, silent: silent);
     }
   }
 
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    backgroundColor: Colors.black,
-    appBar: AppBar(title: Text(widget.title), backgroundColor: Colors.white),
-    body: Stack(
-      children: [
-        if (_isReady && _controller != null)
-          Center(child: CameraPreview(_controller!))
-        else
-          const Center(child: CircularProgressIndicator()),
-        Positioned(
-          bottom: 120,
-          left: 0,
-          right: 0,
-          child: Center(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.black54,
-                borderRadius: BorderRadius.circular(20),
+  Future<void> _syncWeatherForCurrentSlot({bool force = false}) async {
+    if (_isClosing ||
+        _isAutoRefreshingWeatherSlot ||
+        _isRefreshingNativeWeather) {
+      return;
+    }
+
+    final slotKey = captureWeatherRefreshSlotKey(DateTime.now());
+    if (slotKey.isEmpty) {
+      return;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final cachedWeatherText =
+        (prefs.getString(_cachedCaptureWeatherTextPreferenceKey) ?? '').trim();
+    final cachedSlotKey =
+        (prefs.getString(_lastWeatherRefreshSlotPreferenceKey) ?? '').trim();
+
+    if (!force && cachedSlotKey == slotKey) {
+      _currentWeatherSlotKey = slotKey;
+      if (cachedWeatherText.isNotEmpty) {
+        await _applyWeatherText(cachedWeatherText);
+      }
+      return;
+    }
+
+    if (!force && _currentWeatherSlotKey == slotKey) {
+      return;
+    }
+
+    _isAutoRefreshingWeatherSlot = true;
+    try {
+      final weatherText = await _resolveLatestWeatherText(
+        requestPermission: false,
+      );
+      if (weatherText == null) {
+        return;
+      }
+      await _persistWeatherRefreshCache(weatherText, slotKey);
+      _currentWeatherSlotKey = slotKey;
+      await _applyWeatherText(weatherText);
+    } catch (error) {
+      debugPrint('camera slot weather refresh skipped: $error');
+    } finally {
+      _isAutoRefreshingWeatherSlot = false;
+    }
+  }
+
+  void _startCameraSessionIfNeeded() {
+    if (_cameraSessionStarted || _isClosing || _pendingCloseAfterEnter) {
+      return;
+    }
+    _cameraSessionStarted = true;
+    if (_useNativePreview) {
+      setState(() {
+        _attachNativePreview = true;
+      });
+      return;
+    }
+    if (_watermarkEnabled) {
+      _startPreviewClockIfNeeded();
+    }
+    unawaited(_initCamera());
+  }
+
+  bool _routeIsStillEntering() {
+    final routeAnimation = _routeAnimation;
+    if (routeAnimation == null) {
+      return false;
+    }
+    return routeAnimation.status != AnimationStatus.completed;
+  }
+
+  Future<void> _shutdownCameraSession() async {
+    _stopPreviewClock();
+
+    final nativeController = _nativePreviewController;
+    _nativePreviewController = null;
+    if (nativeController != null) {
+      try {
+        await nativeController.shutdownCamera().timeout(
+          const Duration(milliseconds: 500),
+        );
+      } catch (error) {
+        debugPrint('Native camera shutdown error: $error');
+      } finally {
+        nativeController.dispose();
+      }
+    }
+
+    final controller = _controller;
+    _controller = null;
+    if (controller != null) {
+      try {
+        await controller.dispose();
+      } catch (error) {
+        debugPrint('Camera dispose error: $error');
+      }
+    }
+  }
+
+  Future<void> _beginCameraShutdown() async {
+    if (!mounted || _allowSystemPop || _isClosing) {
+      return;
+    }
+
+    setState(() {
+      _cameraStartScheduleToken++;
+      _isClosing = true;
+      _isReady = false;
+      _attachNativePreview = false;
+      _cameraSessionStarted = false;
+    });
+    await _shutdownCameraSession();
+  }
+
+  void _completePop([List<CameraCaptureResult>? result]) {
+    if (!mounted || _allowSystemPop) {
+      return;
+    }
+
+    final navigator = Navigator.of(context);
+    setState(() {
+      _allowSystemPop = true;
+    });
+    navigator.pop(result);
+  }
+
+  Future<void> _closeCameraAndPop([List<CameraCaptureResult>? result]) async {
+    await _beginCameraShutdown();
+    if (!mounted) {
+      return;
+    }
+    _completePop(result);
+  }
+
+  Future<void> _handleCloseRequested() async {
+    if (!mounted || _allowSystemPop || _isClosing) {
+      return;
+    }
+    if (_isCapturing) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('正在拍照，请稍候')));
+      return;
+    }
+    if (_routeIsStillEntering()) {
+      _pendingCloseAfterEnter = true;
+      return;
+    }
+
+    final result = widget.allowContinuousCapture && _photos.isNotEmpty
+        ? List<CameraCaptureResult>.from(_photos)
+        : null;
+    await _closeCameraAndPop(result);
+  }
+
+  Watermark118Data _buildCurrentWatermarkInteractionData() {
+    final previewData = _previewData;
+    final nativeState = _nativeWatermarkState;
+    final adjustments = nativeState == null
+        ? previewData?.adjustments ?? const Watermark118Adjustments()
+        : Watermark118Adjustments.fromMap(
+            Map<String, dynamic>.from(nativeState.adjustments),
+          );
+    return Watermark118Data(
+      location: nativeState?.location.trim().isNotEmpty == true
+          ? nativeState!.location
+          : previewData?.location ?? _resolvedCurrentLocation(),
+      roomCode:
+          nativeState?.roomCode.trim().isNotEmpty == true &&
+              !_isPreviewPlaceholderRoomCode(nativeState!.roomCode)
+          ? nativeState.roomCode
+          : _roomCodeForPreview(),
+      weatherText: nativeState?.weatherText.trim().isNotEmpty == true
+          ? nativeState!.weatherText
+          : previewData?.weatherText ?? _resolvedCurrentWeatherText(),
+      captureTime: previewData?.captureTime ?? DateTime.now(),
+      imprintText: nativeState?.imprintText.trim().isNotEmpty == true
+          ? nativeState!.imprintText
+          : previewData?.imprintText ?? widget.imprintText,
+      antiFakeCode: WatermarkTemplate118Composer.ensureAntiFakeCode(
+        nativeState?.antiFakeCode ?? previewData?.antiFakeCode,
+      ),
+      timeOverrideText:
+          nativeState?.timeOverrideText ?? previewData?.timeOverrideText,
+      dateOverrideText:
+          nativeState?.dateOverrideText ?? previewData?.dateOverrideText,
+      adjustments: adjustments,
+    );
+  }
+
+  Future<void> _applyCurrentRoomCode(String nextRoomCode) async {
+    final normalized = nextRoomCode.trim();
+    final currentPreview = _previewData;
+    setState(() {
+      _currentRoomCode = normalized;
+      if (currentPreview != null || !_useNativePreview || _watermarkEnabled) {
+        _previewData = _buildPreviewData(
+          captureTime: currentPreview?.captureTime ?? DateTime.now(),
+          antiFakeCode: currentPreview?.antiFakeCode,
+          location: currentPreview?.location,
+          weatherText: currentPreview?.weatherText,
+        );
+      }
+    });
+
+    if (_useNativePreview && _nativePreviewController != null) {
+      await _updateNativeWatermarkState(<String, dynamic>{
+        'roomCode': normalized,
+      });
+    }
+  }
+
+  Future<void> _applyCurrentLocation(String nextLocation) async {
+    final normalized = nextLocation.trim();
+    final currentPreview = _previewData;
+    setState(() {
+      _currentLocation = normalized;
+      if (currentPreview != null || !_useNativePreview || _watermarkEnabled) {
+        _previewData = _buildPreviewData(
+          captureTime: currentPreview?.captureTime ?? DateTime.now(),
+          antiFakeCode: currentPreview?.antiFakeCode,
+          location: normalized,
+          weatherText: currentPreview?.weatherText,
+        );
+      }
+    });
+
+    if (_useNativePreview && _nativePreviewController != null) {
+      await _updateNativeWatermarkState(<String, dynamic>{
+        'location': normalized,
+      });
+    }
+  }
+
+  Future<void> _editCurrentRoomCode() async {
+    final controller = TextEditingController(text: _resolvedCurrentRoomCode());
+    try {
+      final nextValue = await showDialog<String>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('修改拍照备注'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            maxLines: 2,
+            decoration: const InputDecoration(
+              labelText: '备注内容',
+              hintText: '请输入本次拍照备注',
+              border: OutlineInputBorder(),
+            ),
+            textInputAction: TextInputAction.done,
+            onSubmitted: (value) => Navigator.of(dialogContext).pop(value),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () =>
+                  Navigator.of(dialogContext).pop(controller.text.trim()),
+              child: const Text('更新'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || nextValue == null) {
+        return;
+      }
+      final normalized = nextValue.trim();
+      if (normalized.isEmpty) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('备注不能为空')));
+        return;
+      }
+      if (normalized == _resolvedCurrentRoomCode()) {
+        return;
+      }
+      await _applyCurrentRoomCode(normalized);
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  Future<void> _editCurrentLocation() async {
+    final controller = TextEditingController(text: _resolvedCurrentLocation());
+    try {
+      final nextValue = await showDialog<String>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('修改水印地址'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            maxLines: 2,
+            decoration: const InputDecoration(
+              labelText: '地址内容',
+              hintText: '请输入当前水印地址',
+              border: OutlineInputBorder(),
+            ),
+            textInputAction: TextInputAction.done,
+            onSubmitted: (value) => Navigator.of(dialogContext).pop(value),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () =>
+                  Navigator.of(dialogContext).pop(controller.text.trim()),
+              child: const Text('更新'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted || nextValue == null) {
+        return;
+      }
+      final normalized = nextValue.trim();
+      if (normalized == _resolvedCurrentLocation()) {
+        return;
+      }
+      await _applyCurrentLocation(normalized);
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  Widget _buildRoomCodeEditOverlay({
+    required double bottomReserved,
+    required Size viewportSize,
+  }) {
+    if (!_watermarkEnabled ||
+        viewportSize.width <= 0 ||
+        viewportSize.height <= 0) {
+      return const SizedBox.shrink();
+    }
+    final rect = WatermarkTemplate118Composer.estimateRoomCodeBadgeRect(
+      imageWidth: viewportSize.width,
+      imageHeight: viewportSize.height,
+      data: _buildCurrentWatermarkInteractionData(),
+      extraBottomInsetPx: bottomReserved,
+    );
+    if (rect.width <= 0 || rect.height <= 0) {
+      return const SizedBox.shrink();
+    }
+    return Positioned.fromRect(
+      rect: rect,
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () => unawaited(_editCurrentRoomCode()),
+        child: const SizedBox.expand(),
+      ),
+    );
+  }
+
+  Watermark118Data _buildPreviewData({
+    DateTime? captureTime,
+    String? antiFakeCode,
+    String? location,
+    String? weatherText,
+  }) {
+    final current = _previewData;
+    return Watermark118Data(
+      location: location ?? current?.location ?? _resolvedCurrentLocation(),
+      roomCode: _roomCodeForPreview(),
+      weatherText:
+          weatherText ?? current?.weatherText ?? _resolvedCurrentWeatherText(),
+      captureTime: captureTime ?? DateTime.now(),
+      imprintText: widget.imprintText,
+      antiFakeCode: WatermarkTemplate118Composer.ensureAntiFakeCode(
+        antiFakeCode ?? current?.antiFakeCode,
+      ),
+      adjustments: current?.adjustments ?? const Watermark118Adjustments(),
+    );
+  }
+
+  void _refreshPreviewClock() {
+    if (!mounted || !_watermarkEnabled) {
+      return;
+    }
+    final next = _buildPreviewData(captureTime: DateTime.now());
+    if (_previewData?.formattedTime == next.formattedTime) {
+      return;
+    }
+    setState(() {
+      _previewData = next;
+    });
+  }
+
+  Future<void> _loadNativeWatermarkState() async {
+    final controller = _nativePreviewController;
+    if (!_useNativePreview || controller == null || _isClosing) {
+      return;
+    }
+    try {
+      final state = await controller.getWatermarkState();
+      if (!mounted || _isClosing || controller != _nativePreviewController) {
+        return;
+      }
+      setState(() {
+        _nativeWatermarkState = state;
+        _watermarkEnabled = state.watermarkEnabled;
+        _currentLocation = state.location.trim().isEmpty
+            ? _currentLocation
+            : state.location;
+        _currentRoomCode =
+            state.roomCode.trim().isEmpty ||
+                _isPreviewPlaceholderRoomCode(state.roomCode)
+            ? _currentRoomCode
+            : state.roomCode;
+      });
+      final currentWeatherText = _resolvedCurrentWeatherText();
+      if (state.weatherText != currentWeatherText) {
+        await _updateNativeWatermarkState(<String, dynamic>{
+          'weatherText': currentWeatherText,
+        }, silent: true);
+      }
+    } catch (error) {
+      debugPrint('load native watermark state failed: $error');
+    }
+  }
+
+  Future<void> _persistWatermarkEnabledPreference(bool value) async {
+    try {
+      final onChanged = widget.onWatermarkPreferenceChanged;
+      if (onChanged != null) {
+        await onChanged(value);
+        return;
+      }
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_defaultWatermarkEnabledPreferenceKey, value);
+    } catch (error) {
+      debugPrint('persist watermark preference failed: $error');
+    }
+  }
+
+  Future<NativeWatermarkPreviewState?> _updateNativeWatermarkState(
+    Map<String, dynamic> changes, {
+    bool silent = false,
+  }) async {
+    final controller = _nativePreviewController;
+    if (!_useNativePreview || controller == null || _isClosing) {
+      return null;
+    }
+    try {
+      final state = await controller.updateWatermarkState(changes);
+      if (!mounted || _isClosing || controller != _nativePreviewController) {
+        return null;
+      }
+      setState(() {
+        _nativeWatermarkState = state;
+        _watermarkEnabled = state.watermarkEnabled;
+        _currentLocation = state.location.trim().isEmpty
+            ? _currentLocation
+            : state.location;
+        _currentRoomCode =
+            state.roomCode.trim().isEmpty ||
+                _isPreviewPlaceholderRoomCode(state.roomCode)
+            ? _currentRoomCode
+            : state.roomCode;
+      });
+      return state;
+    } catch (error) {
+      if (!mounted || silent) {
+        return null;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('更新水印失败: $error')));
+      return null;
+    }
+  }
+
+  Future<bool> _ensureNativeLocationPermission(String targetLabel) async {
+    final status = await Permission.location.status;
+    if (status.isDenied) {
+      final requested = await Permission.location.request();
+      if (!requested.isGranted) {
+        if (requested.isPermanentlyDenied && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('定位权限已被永久拒绝，已为你打开$targetLabel的系统设置入口'),
+              action: SnackBarAction(label: '设置', onPressed: openAppSettings),
+            ),
+          );
+        }
+        return false;
+      }
+    } else if (status.isPermanentlyDenied) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('需要定位权限才能获取$targetLabel'),
+            action: SnackBarAction(label: '设置', onPressed: openAppSettings),
+          ),
+        );
+      }
+      return false;
+    }
+    return true;
+  }
+
+  Future<NativeWatermarkPreviewState?> _refreshNativeAddress() async {
+    final currentState = _nativeWatermarkState;
+    if (!_useNativePreview ||
+        currentState == null ||
+        _isRefreshingNativeAddress) {
+      return null;
+    }
+
+    setState(() {
+      _isRefreshingNativeAddress = true;
+    });
+
+    try {
+      if (!await _ensureNativeLocationPermission('地址')) {
+        return null;
+      }
+
+      final snapshot = await CaptureLocationService.resolveSnapshot(
+        fallbackAddress: currentState.location,
+      );
+      if (snapshot.position == null &&
+          snapshot.address == currentState.location) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('未获取到最新地址，已保留当前文本')));
+        }
+        return null;
+      }
+
+      final state = await _updateNativeWatermarkState(<String, dynamic>{
+        'location': snapshot.address,
+      });
+      if (mounted && state != null) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('地址已刷新')));
+      }
+      return state;
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('地址刷新失败: $error')));
+      }
+      return null;
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isRefreshingNativeAddress = false;
+        });
+      }
+    }
+  }
+
+  Future<NativeWatermarkPreviewState?> _refreshNativeWeather() async {
+    final currentState = _nativeWatermarkState;
+    if (!_useNativePreview ||
+        currentState == null ||
+        _isRefreshingNativeWeather ||
+        _isAutoRefreshingWeatherSlot) {
+      return null;
+    }
+
+    setState(() {
+      _isRefreshingNativeWeather = true;
+    });
+
+    try {
+      final weatherText = await _resolveLatestWeatherText(
+        requestPermission: true,
+        showNoLocationMessage: true,
+      );
+      if (weatherText == null) {
+        return null;
+      }
+
+      final slotKey = captureWeatherRefreshSlotKey(DateTime.now());
+      if (slotKey.isNotEmpty) {
+        await _persistWeatherRefreshCache(weatherText, slotKey);
+        _currentWeatherSlotKey = slotKey;
+      }
+      await _applyWeatherText(weatherText);
+      final state = _nativeWatermarkState;
+      if (mounted && state != null) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('天气已刷新')));
+      }
+      return state;
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('天气刷新失败: $error')));
+      }
+      return null;
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isRefreshingNativeWeather = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _setWatermarkEnabled(bool value) async {
+    if (_watermarkEnabled == value || _isClosing) {
+      return;
+    }
+
+    if (_useNativePreview) {
+      final state = await _updateNativeWatermarkState(<String, dynamic>{
+        'watermarkEnabled': value,
+      });
+      if (!mounted || state == null) {
+        return;
+      }
+      await _persistWatermarkEnabledPreference(state.watermarkEnabled);
+      return;
+    }
+
+    setState(() {
+      _watermarkEnabled = value;
+      if (value) {
+        _previewData = _buildPreviewData(captureTime: DateTime.now());
+      }
+    });
+    if (value) {
+      _startPreviewClockIfNeeded();
+    } else {
+      _stopPreviewClock();
+    }
+    await _persistWatermarkEnabledPreference(value);
+  }
+
+  Widget _buildViewportPlaceholder(String label) {
+    return ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(strokeWidth: 2.6),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              label,
+              style: const TextStyle(color: Colors.white70, fontSize: 14),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildClosingViewport() {
+    return const ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: Text(
+          '正在关闭相机...',
+          style: TextStyle(color: Colors.white70, fontSize: 14),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCameraViewport() {
+    if (_isClosing) {
+      return _buildClosingViewport();
+    }
+
+    if (_useNativePreview) {
+      if (!_attachNativePreview) {
+        return _buildViewportPlaceholder('等待页面切换完成...');
+      }
+      return Stack(
+        children: [
+          Positioned.fill(
+            child: NativeWatermarkCameraPreview(
+              title: widget.title,
+              roomCode: _roomCodeForPreview(),
+              location: _resolvedCurrentLocation(),
+              weatherText: _resolvedCurrentWeatherText(),
+              imprintText: widget.imprintText,
+              watermarkEnabled: _watermarkEnabled,
+              onCreated: (controller) {
+                if (_isClosing) {
+                  unawaited(
+                    controller
+                        .shutdownCamera()
+                        .catchError(
+                          (Object error) => debugPrint(
+                            'Native camera early shutdown error: $error',
+                          ),
+                        )
+                        .whenComplete(controller.dispose),
+                  );
+                  return;
+                }
+                _nativePreviewController = controller;
+                unawaited(_loadNativeWatermarkState());
+              },
+              onCameraReady: _handleNativePreviewReady,
+              onCameraError: _handleNativePreviewError,
+            ),
+          ),
+          if (!_isReady)
+            const Positioned.fill(
+              child: ColoredBox(
+                color: Colors.black26,
+                child: Center(child: CircularProgressIndicator()),
               ),
-              child: Text(
-                widget.captureCount > 1 ? '拍摄第 ${_captured + 1} 张' : '点击拍照',
-                style: const TextStyle(color: Colors.white),
-              ),
+            ),
+        ],
+      );
+    }
+
+    final controller = _controller;
+    if (!_isReady || controller == null) {
+      return _buildViewportPlaceholder(
+        _cameraSessionStarted ? '正在打开相机...' : '等待页面切换完成...',
+      );
+    }
+
+    final previewSize = controller.value.previewSize;
+    if (previewSize == null) {
+      return Center(child: CameraPreview(controller));
+    }
+
+    return ClipRect(
+      child: FittedBox(
+        fit: BoxFit.cover,
+        child: SizedBox(
+          width: previewSize.height,
+          height: previewSize.width,
+          child: CameraPreview(controller),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _onShoot() async {
+    if (!_isReady || _isClosing || _isCapturing) {
+      return;
+    }
+    if (widget.allowContinuousCapture &&
+        _resolvedCurrentRoomCode().trim().isEmpty) {
+      await _editCurrentRoomCode();
+      if (!mounted || _resolvedCurrentRoomCode().trim().isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('请先填写拍照备注再拍摄')));
+        }
+        return;
+      }
+    }
+    setState(() {
+      _isCapturing = true;
+    });
+    try {
+      CameraCaptureResult? captureResult;
+      if (_useNativePreview) {
+        final controller = _nativePreviewController;
+        if (controller == null) {
+          return;
+        }
+        final nativeResult = await controller.capture();
+        final capture = _buildNativeCaptureResult(nativeResult);
+        if (capture == null) {
+          throw StateError('原生相机没有返回照片');
+        }
+        captureResult = capture;
+      } else {
+        final controller = _controller;
+        if (controller == null) {
+          return;
+        }
+        final captureData = _buildPreviewData(captureTime: DateTime.now());
+        if (_watermarkEnabled) {
+          setState(() {
+            _previewData = captureData;
+          });
+        }
+        final image = await controller.takePicture();
+        captureResult = CameraCaptureResult(
+          photo: image,
+          watermarkData: captureData,
+          skipCompose: !_watermarkEnabled,
+          watermarkEnabled: _watermarkEnabled,
+        );
+      }
+
+      final nextCaptureCount = _captured + 1;
+      final onCaptureProcessed = widget.onCaptureProcessed;
+      if (onCaptureProcessed != null) {
+        await onCaptureProcessed(captureResult, nextCaptureCount);
+      }
+      _photos.add(captureResult);
+      _captured++;
+      if (!mounted) return;
+      final bool isFinalCapture =
+          !widget.allowContinuousCapture && _captured >= widget.captureCount;
+      Future<void>? shutdownFuture;
+      if (isFinalCapture) {
+        shutdownFuture = _beginCameraShutdown();
+      }
+      await _showCaptureFeedback();
+      if (!mounted) return;
+      if (isFinalCapture) {
+        if (shutdownFuture != null) {
+          await shutdownFuture;
+        }
+        if (!mounted) return;
+        await Future<void>.delayed(_finalCaptureReturnDelay);
+        if (!mounted) return;
+        _completePop(_photos);
+      } else if (_useNativePreview) {
+        setState(() {});
+      } else if (_watermarkEnabled) {
+        setState(() {
+          _previewData = _buildPreviewData(
+            captureTime: DateTime.now(),
+            antiFakeCode: WatermarkTemplate118Composer.generateAntiFakeCode(),
+          );
+        });
+      } else {
+        setState(() {});
+      }
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('拍照失败: $e')));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isCapturing = false;
+        });
+      } else {
+        _isCapturing = false;
+      }
+    }
+  }
+
+  Future<void> _showCaptureFeedback() async {
+    final entry = OverlayEntry(
+      builder: (context) => Center(
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: Colors.black87,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.check_circle, color: Colors.green, size: 50),
+                const SizedBox(height: 10),
+                Text(
+                  widget.allowContinuousCapture
+                      ? '已拍 $_captured 张'
+                      : widget.captureCount > 1
+                      ? '第 $_captured / ${widget.captureCount} 张'
+                      : '拍照成功',
+                  style: const TextStyle(color: Colors.white, fontSize: 18),
+                ),
+              ],
             ),
           ),
         ),
-      ],
-    ),
-    floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
-    floatingActionButton: Hero(
-      tag: 'fab_main_action',
-      child: FloatingActionButton.large(
-        heroTag: null,
-        onPressed: _isReady ? _onShoot : null,
-        backgroundColor: Colors.white,
-        child: Icon(Icons.camera_alt, color: Theme.of(context).primaryColor),
       ),
-    ),
-  );
+    );
+    Overlay.of(context).insert(entry);
+    await Future.delayed(const Duration(milliseconds: 800));
+    entry.remove();
+  }
+
+  CameraCaptureResult? _buildNativeCaptureResult(Map<String, dynamic> entry) {
+    final photoPath = (entry['photoPath'] as String?)?.trim() ?? '';
+    if (photoPath.isEmpty) {
+      return null;
+    }
+
+    final captureTimeMillis =
+        (entry['captureTimeMillis'] as num?)?.toInt() ??
+        DateTime.now().millisecondsSinceEpoch;
+    final rawAdjustments = entry['adjustments'];
+    final adjustments = rawAdjustments is Map
+        ? Watermark118Adjustments.fromMap(
+            Map<String, dynamic>.from(
+              rawAdjustments.map(
+                (key, value) => MapEntry(key.toString(), value),
+              ),
+            ),
+          )
+        : _nativeWatermarkState != null
+        ? Watermark118Adjustments.fromMap(
+            Map<String, dynamic>.from(_nativeWatermarkState!.adjustments),
+          )
+        : const Watermark118Adjustments();
+
+    return CameraCaptureResult(
+      photo: XFile(photoPath),
+      skipCompose:
+          (entry['skipCompose'] as bool?) ??
+          !((entry['watermarkEnabled'] as bool?) ?? true),
+      watermarkEnabled: (entry['watermarkEnabled'] as bool?) ?? true,
+      preferNativeCompose:
+          ((entry['watermarkEnabled'] as bool?) ?? true) &&
+          ((entry['preferNativeCompose'] as bool?) ?? true),
+      watermarkData: Watermark118Data(
+        location: (entry['location'] as String?) ?? _resolvedCurrentLocation(),
+        roomCode: (entry['roomCode'] as String?) ?? _resolvedCurrentRoomCode(),
+        weatherText:
+            (entry['weatherText'] as String?) ?? _resolvedCurrentWeatherText(),
+        captureTime: DateTime.fromMillisecondsSinceEpoch(captureTimeMillis),
+        imprintText: (entry['imprintText'] as String?) ?? widget.imprintText,
+        antiFakeCode: WatermarkTemplate118Composer.ensureAntiFakeCode(
+          entry['antiFakeCode'] as String?,
+        ),
+        secureCodeSpacingValue: adjustments.secureCodeSpacingValue,
+        timeOverrideText: (entry['displayTimeText'] as String?)
+            ?.trim()
+            .replaceAll('\n', ' ')
+            .trim(),
+        dateOverrideText: (entry['displayDateText'] as String?)
+            ?.trim()
+            .replaceAll('\n', ' ')
+            .trim(),
+        adjustments: adjustments,
+      ),
+    );
+  }
+
+  void _handleNativePreviewReady() {
+    if (!mounted || _isClosing) {
+      return;
+    }
+    setState(() {
+      _isReady = true;
+    });
+    unawaited(_loadNativeWatermarkState());
+    unawaited(_syncWeatherForCurrentSlot());
+  }
+
+  void _handleNativePreviewError(String message) {
+    if (!mounted || _isClosing) {
+      return;
+    }
+    setState(() {
+      _isReady = false;
+    });
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('原生预览初始化失败: $message')));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final previewBottomReserved = 144 + MediaQuery.paddingOf(context).bottom;
+
+    return PopScope(
+      canPop: _allowSystemPop,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) {
+          unawaited(_handleCloseRequested());
+        }
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        extendBodyBehindAppBar: true,
+        appBar: AppBar(
+          leading: IconButton(
+            onPressed: _isClosing
+                ? null
+                : () => unawaited(_handleCloseRequested()),
+            icon: const Icon(Icons.arrow_back_ios_new),
+          ),
+          title: Text(widget.title),
+          backgroundColor: Colors.black.withValues(alpha: 0.18),
+          foregroundColor: Colors.white,
+          elevation: 0,
+          actions: [
+            IconButton(
+              onPressed: _isClosing
+                  ? null
+                  : () => unawaited(_editCurrentLocation()),
+              icon: const Icon(Icons.edit_location_alt_outlined),
+              tooltip: '修改水印地址',
+            ),
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: TextButton.icon(
+                onPressed: _isClosing
+                    ? null
+                    : () => unawaited(_setWatermarkEnabled(!_watermarkEnabled)),
+                icon: Icon(
+                  _watermarkEnabled
+                      ? Icons.branding_watermark_outlined
+                      : Icons.image_not_supported_outlined,
+                  color: Colors.white,
+                ),
+                label: Text(
+                  _watermarkEnabled ? '水印开' : '水印关',
+                  style: const TextStyle(color: Colors.white),
+                ),
+              ),
+            ),
+            if (_useNativePreview && _attachNativePreview && _watermarkEnabled)
+              Padding(
+                padding: const EdgeInsets.only(right: 12),
+                child: Center(
+                  child: NativeWatermarkControlPanel(
+                    state: _nativeWatermarkState,
+                    isRefreshingAddress: _isRefreshingNativeAddress,
+                    isRefreshingWeather: _isRefreshingNativeWeather,
+                    onUpdateState: _updateNativeWatermarkState,
+                    onRefreshAddress: _refreshNativeAddress,
+                    onRefreshWeather: _refreshNativeWeather,
+                  ),
+                ),
+              ),
+          ],
+        ),
+        body: LayoutBuilder(
+          builder: (context, constraints) {
+            final viewportSize = Size(
+              constraints.maxWidth,
+              constraints.maxHeight,
+            );
+            return Stack(
+              children: [
+                Positioned.fill(child: _buildCameraViewport()),
+                if (!_useNativePreview)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Colors.black.withValues(alpha: 0.16),
+                              Colors.transparent,
+                              Colors.black.withValues(alpha: 0.26),
+                              Colors.black.withValues(alpha: 0.4),
+                            ],
+                            stops: const [0, 0.22, 0.72, 1],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (!_useNativePreview &&
+                    _watermarkEnabled &&
+                    _previewData != null)
+                  Positioned.fill(
+                    child: Watermark118CaptureOverlay(
+                      data: _previewData!,
+                      bottomReserved: previewBottomReserved,
+                    ),
+                  ),
+                _buildRoomCodeEditOverlay(
+                  bottomReserved: previewBottomReserved,
+                  viewportSize: viewportSize,
+                ),
+                Positioned(
+                  bottom: 112 + MediaQuery.paddingOf(context).bottom,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.56),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Text(
+                        _isClosing
+                            ? '正在关闭相机...'
+                            : !_cameraSessionStarted
+                            ? '等待页面切换完成'
+                            : widget.allowContinuousCapture
+                            ? _captured == 0
+                                  ? '连续拍照模式，返回结束本次拍摄'
+                                  : '已连续拍摄 $_captured 张，返回结束本次拍摄'
+                            : widget.captureCount > 1
+                            ? '拍摄第 ${_captured + 1} 张'
+                            : !_watermarkEnabled
+                            ? '无水印原图模式'
+                            : _useNativePreview
+                            ? '原生实时预览'
+                            : '实时水印预览',
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+        floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+        floatingActionButton: Hero(
+          tag: 'fab_main_action',
+          child: FloatingActionButton.large(
+            heroTag: null,
+            onPressed: _isReady && !_isClosing && !_isCapturing
+                ? _onShoot
+                : null,
+            backgroundColor: Colors.white,
+            child: Icon(
+              Icons.camera_alt,
+              color: Theme.of(context).primaryColor,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }

@@ -1,16 +1,166 @@
-# photo_namer
+# PhotoNamer
 
-A new Flutter project.
+`PhotoNamer` 是一个面向巡检拍照、动力抄表和现场模板管理的一体化 Flutter 应用，主要用于把机房/配电房这类重复性巡检工作做成可配置、可记录、可同步、可更新的移动端工具。
 
-## Getting Started
+它不是单纯的“拍照 App”，而是把以下几类现场流程放到了同一个应用里：
 
-This project is a starting point for a Flutter application.
+- 固定房间模板拍照
+- 水印叠加与防伪码生成
+- 动力抄表与 OCR 识别
+- 五时段动力超标模板管理
+- 巡检排班与日历记录
+- 基于 Gitee 的云端配置同步与版本更新
 
-A few resources to get you started if this is your first Flutter project:
+## 项目定位
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+这个项目更偏向内部业务工具，核心目标是解决“现场巡检流程碎片化”的问题，让拍照、抄表、导出、同步、版本发布尽量走同一套操作链路。
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+适用场景包括：
+
+- 固定房间或固定点位的日常巡检拍照
+- 配电房、进线柜、UPS 等设备的抄表记录
+- 按班次、按时段执行巡检任务的个人排班管理
+- 多设备之间同步房间模板、抄表模板、水印参数
+- 内部团队通过云端下发配置和应用更新
+
+## 核心功能
+
+### 1. 固定房间巡检拍照
+
+- 支持预设房间模板、分类、楼层筛选和搜索
+- 支持待办/已完成状态切换
+- 支持一房间多张照片采集
+- 支持拍照完成后导出 ZIP
+- 支持拍照后联动记录巡检时段完成情况
+
+### 2. 水印拍照系统
+
+- 支持时间、地址、天气、防伪码等信息写入水印
+- 支持默认水印地址和验证文案配置
+- 支持自动生成防伪码
+- 支持拍照页内直接修改备注
+- 支持“直拍”模式，进入即拍、连续保存、独立目录落盘
+
+### 3. 动力抄表
+
+- 支持按房间管理抄表设备模板
+- 支持当前抄表数据导入导出
+- 支持设备模板精简导入导出
+- 支持 OCR 辅助录入
+- 支持对进线柜默认启用百度仪表 OCR
+
+### 4. 动力超标页
+
+- 内置 `csv` 目录下五套时段数据
+- 支持选择某个时段导出
+- 支持自动匹配当前时间最近的时段
+- 支持把当前抄表数据写回指定时段模板
+- 支持把时段模板覆盖到当前抄表数据
+- 支持对非零电流做随机浮动导出
+- 支持锁定指定房间/设备，使其不参与随机处理
+
+### 5. 巡检日历与排班
+
+- 支持按月查看巡检记录
+- 支持按五个时段记录每日巡检情况
+- 支持拍照导出后自动补记当前时段
+- 支持个人轮班计划计算
+- 支持首个轮值日期手动设置
+- 支持夜班特殊规则
+
+### 6. 云端同步与版本更新
+
+- 基于 Gitee 仓库 API 做配置同步
+- 支持房间模板、动力超标模板、水印参数等发布与拉取
+- 支持选择云端覆盖范围
+- 支持本地与云端差异检测
+- 支持游客提交配置，由管理员审核并决定是否并入云端
+- 支持基于 Gitee Release 的应用版本发布与更新检测
+
+## 主要页面
+
+| 页面 | 作用 |
+| --- | --- |
+| 首页 | 巡检拍照主工作台，管理模板、待办、完成、导出等操作 |
+| 拍照页 | 执行现场拍照，显示水印预览，支持连续拍摄与备注修改 |
+| 直拍 | 不走固定房间模板，直接进入拍照并即时保存 |
+| 动力抄表 | 管理抄表房间、设备模板、当前抄表数据 |
+| 动力超标 | 管理五个时段的超标模板、导出、随机浮动、回写覆盖 |
+| 云端同步 | 发布、拉取、对比云端配置，并管理应用更新 |
+| 巡检日历 | 查看个人巡检计划、当日任务和历史完成记录 |
+
+更详细的页面结构说明见：
+
+- [docs/ui_page_design.md](docs/ui_page_design.md)
+
+## 技术实现
+
+- Flutter 3 / Dart 3
+- Android 端拍照与原生预览联动
+- `camera` 进行相机采集
+- `shared_preferences` 做本地持久化
+- `file_picker`、`archive`、`share_plus` 做文件导入导出与分享
+- `google_mlkit_text_recognition` 做本地 OCR
+- 百度仪表 OCR 接口用于在线仪表识别
+- Gitee 仓库 API / Release API 用于配置同步和版本更新
+
+## 目录结构
+
+```text
+lib/
+  main.dart                      主流程与大部分页面入口
+  cloud_sync_page.dart           云端同步相关逻辑
+  watermark_template_118.dart    水印模板与绘制逻辑
+  capture_weather_service.dart   天气获取
+  capture_location_service.dart  地址定位
+  raw_capture_batch_page.dart    原图批量合成
+
+csv/                             五套动力超标时段数据
+docs/                            设计与发布说明文档
+tool/                            打包、发布、修复云端清单脚本
+```
+
+## 本地开发
+
+### 运行项目
+
+```bash
+flutter pub get
+flutter run
+```
+
+### 打包发布
+
+项目已经内置打包与发布脚本，常用方式如下：
+
+```powershell
+publish_release.bat
+```
+
+或只打 64 位发布包：
+
+```powershell
+build_release_package_arm64.bat
+```
+
+发布说明详见：
+
+- [docs/release_publish.md](docs/release_publish.md)
+
+## 项目特点
+
+- 业务流程强绑定，偏现场巡检而不是通用拍照
+- 本地模板、云端模板、发布更新三套能力打通
+- 同时兼顾一线使用效率和后台模板维护效率
+- 已内置较多针对真实巡检场景的细化规则
+
+## 说明
+
+这个仓库当前更偏团队内部使用版本，部分能力依赖实际业务配置，例如：
+
+- 云端仓库配置
+- OCR 相关密钥
+- 水印模板参数
+- Android 签名与更新发布策略
+
+如果要对外分发或二次开发，建议先梳理配置项和密钥管理方式。

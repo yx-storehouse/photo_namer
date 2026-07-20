@@ -1,0 +1,274 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/watermark118LeftRoot"
+    android:layout_width="252dp"
+    android:layout_height="wrap_content"
+    android:layout_gravity="bottom|start"
+    android:orientation="vertical"
+    android:clipChildren="false"
+    android:clipToPadding="false">
+
+    <!-- 时间条：
+         layout_width / layout_height 控制整条底纹大小；
+         如果时间左右不居中，先调 tvWatermarkTime.layout_marginEnd，再看 GradientStrokeTextView.kt -->
+    <RelativeLayout
+        android:id="@+id/watermark118TimeStrip"
+        android:layout_width="100dp"
+        android:layout_height="30dp"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:background="@drawable/dk_102_time_new">
+
+        <!-- 左侧黄块：
+             layout_marginStart 调大 -> 黄块整体右移；
+             36x24 是当前贴近原版的小时间条尺寸 -->
+        <FrameLayout
+            android:id="@+id/watermark118TagShell"
+            android:layout_width="36dp"
+            android:layout_height="24dp"
+            android:layout_marginStart="4dp"
+            android:layout_centerVertical="true"
+            android:background="@drawable/bg_ffc233_r2">
+
+            <ImageView
+                android:layout_width="28dp"
+                android:layout_height="14dp"
+                android:layout_gravity="center"
+                android:adjustViewBounds="true"
+                android:src="@drawable/dk_tu2"
+                android:scaleType="fitCenter" />
+        </FrameLayout>
+
+        <!-- 时间字：
+             layout_marginEnd 调大 -> 数字整体往左；
+             minWidth 调大 -> 数字可用宽度变大；
+             textSize 调大 -> 字更大；
+             letterSpacing 调大 -> 字间距更开。
+             像素级微调建议每次 0.5dp ~ 1dp -->
+        <com.example.photo_namer.ui.GradientStrokeTextView
+            android:id="@+id/tvWatermarkTime"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_alignParentEnd="true"
+            android:layout_centerVertical="true"
+            android:layout_marginEnd="6dp"
+            android:layout_toEndOf="@id/watermark118TagShell"
+            android:fontFamily="@font/bebas_daka"
+            android:gravity="center"
+            android:includeFontPadding="false"
+            android:letterSpacing="0.02"
+            android:maxLines="1"
+            android:minWidth="52dp"
+            android:text="21:01"
+            android:textColor="#FFFFFFFF"
+            android:textSize="26dp" />
+    </RelativeLayout>
+
+    <!-- 地址/日期/天气正文区：
+         左侧 3dp 黄竖条 + 右侧正文列。
+         这里的 marginStart 控制正文离黄条的距离。 -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal"
+        android:clipChildren="false">
+
+        <View
+            android:layout_width="3dp"
+            android:layout_height="match_parent"
+            android:background="@drawable/jr_water_mark_block" />
+
+        <LinearLayout
+            android:id="@+id/watermark118CopyColumn"
+            android:layout_width="241dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:orientation="vertical">
+
+            <!-- 地址：
+                 maxLines=2 允许长地址自动换成两行；
+                 textSize 调大 -> 地址更醒目；
+                 lineSpacingExtra 调大 -> 两行之间更松。
+                 如果想回到单行，可把 maxLines 改回 1 -->
+            <TextView
+                android:id="@+id/tvWatermarkLocation"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="@font/hy_qi_hei_x2_65w"
+                android:includeFontPadding="false"
+                android:lineSpacingExtra="1dp"
+                android:shadowColor="#66000000"
+                android:shadowDx="0"
+                android:shadowDy="1.5"
+                android:shadowRadius="3.5"
+                android:text="杭州市萧山区 · 小诺宠物(泰悦银座店)"
+                android:textColor="#FFFFFFFF"
+                android:textSize="15.6sp" />
+
+            <!-- 日期：
+                 layout_marginTop 调大 -> 日期往下；
+                 目前地址 / 日期 / 天气三行正文统一字号。 -->
+            <TextView
+                android:id="@+id/tvWatermarkDate"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:ellipsize="end"
+                android:fontFamily="@font/hy_qi_hei_x2_65w"
+                android:includeFontPadding="false"
+                android:maxLines="1"
+                android:shadowColor="#66000000"
+                android:shadowDx="0"
+                android:shadowDy="1.5"
+                android:shadowRadius="3.5"
+                android:text="2026.03.13 星期五"
+                android:textColor="#FFFFFFFF"
+                android:textSize="15.6sp" />
+
+            <!-- 天气：
+                 layout_marginTop 调大 -> 天气往下；
+                 目前地址 / 日期 / 天气三行正文统一字号。 -->
+            <TextView
+                android:id="@+id/tvWatermarkWeather"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:ellipsize="end"
+                android:fontFamily="@font/hy_qi_hei_x2_65w"
+                android:includeFontPadding="false"
+                android:maxLines="1"
+                android:shadowColor="#66000000"
+                android:shadowDx="0"
+                android:shadowDy="1.5"
+                android:shadowRadius="3.5"
+                android:text="天气获取中"
+                android:textColor="#FFFFFFFF"
+                android:textSize="15.6sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- 备注块：
+         layout_marginTop 调大 -> 整块往下；
+         paddingStart/End 调大 -> 背景横向更宽；
+         paddingTop/Bottom 调大 -> 背景纵向更高 -->
+    <TextView
+        android:id="@+id/tvWatermarkRoomCode"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/bg_custom_text"
+        android:fontFamily="@font/hy_qi_hei_x2_65w"
+        android:gravity="center_vertical"
+        android:paddingStart="6dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="10dp"
+        android:paddingBottom="6dp"
+        android:text="pk01"
+        android:textColor="#F0FFFFFF"
+        android:textSize="12sp" />
+
+    <!-- 左下验证备注：
+         layout_marginTop 调大 -> 整行往下；
+         这里已经拆成“盾牌 + 主文案 + 半透明分隔符 + 后半段文案”。
+         如果你要继续抠这块，优先看：
+         ivWatermarkImprint / tvWatermarkImprintPrefix /
+         tvWatermarkImprintDivider / tvWatermarkImprintSuffix -->
+    <LinearLayout
+        android:id="@+id/imprintRow"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="5dp"
+        android:baselineAligned="false"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <!-- 盾牌图标：
+             width/height 调大 -> 图标更大 -->
+        <ImageView
+            android:id="@+id/ivWatermarkImprint"
+            android:layout_width="12sp"
+            android:layout_height="14sp"
+            android:layout_gravity="center_vertical"
+            android:adjustViewBounds="true"
+            android:alpha="0.7"
+            android:maxWidth="12sp"
+            android:src="@mipmap/imprint_1" />
+
+        <!-- 验证文案组：
+             layout_marginStart 调大 -> 离盾牌更远；
+             三段文字都走同一套阴影；
+             Divider 单独降透明度，模拟原测试软件里更“淡”的分隔符 -->
+        <LinearLayout
+            android:id="@+id/imprintTextGroup"
+            android:layout_width="wrap_content"
+            android:layout_height="14sp"
+            android:layout_gravity="center_vertical"
+            android:layout_marginStart="4dp"
+            android:baselineAligned="false"
+            android:gravity="center_vertical"
+            android:minHeight="14sp"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/tvWatermarkImprintPrefix"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:layout_gravity="center_vertical"
+                android:ellipsize="end"
+                android:fontFamily="@font/hy_qi_hei_x2_65w"
+                android:gravity="center_vertical"
+                android:includeFontPadding="false"
+                android:maxLines="1"
+                android:minHeight="14sp"
+                android:shadowColor="#66000000"
+                android:shadowDx="0"
+                android:shadowDy="1.5"
+                android:shadowRadius="3.5"
+                android:text="今日水印相机已验证"
+                android:textColor="#B3FFFFFF"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/tvWatermarkImprintDivider"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:layout_gravity="center_vertical"
+                android:layout_marginStart="4dp"
+                android:layout_marginEnd="4dp"
+                android:fontFamily="@font/hy_qi_hei_x2_65w"
+                android:gravity="center_vertical"
+                android:includeFontPadding="false"
+                android:maxLines="1"
+                android:minHeight="14sp"
+                android:shadowColor="#66000000"
+                android:shadowDx="0"
+                android:shadowDy="1.5"
+                android:shadowRadius="3.5"
+                android:text="I"
+                android:textColor="#80FFFFFF"
+                android:textScaleX="0.86"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/tvWatermarkImprintSuffix"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:layout_gravity="center_vertical"
+                android:ellipsize="end"
+                android:fontFamily="@font/hy_qi_hei_x2_65w"
+                android:gravity="center_vertical"
+                android:includeFontPadding="false"
+                android:maxLines="1"
+                android:minHeight="14sp"
+                android:shadowColor="#66000000"
+                android:shadowDx="0"
+                android:shadowDy="1.5"
+                android:shadowRadius="3.5"
+                android:text="时间地点真实"
+                android:textColor="#B3FFFFFF"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+</LinearLayout>

@@ -44,3 +44,6 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 Boorusama/
+
+# 嵌套的空 git 仓库,不纳入本仓库
+/p2p/

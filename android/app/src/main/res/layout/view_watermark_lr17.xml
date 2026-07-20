@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/watermarkRightRoot"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:layout_gravity="bottom|end"
+    android:clipChildren="false"
+    android:clipToPadding="false"
+    android:gravity="end"
+    android:orientation="vertical">
+
+    <!-- 主图 water17：
+         默认按素材原比例；
+         如果只想单独移动右下角，优先改 secureRow.translationX -->
+    <FrameLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:clipChildren="false"
+        android:clipToPadding="false">
+
+        <ImageView
+            android:id="@+id/ivWatermarkBrand"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_vertical|end"
+            android:adjustViewBounds="true"
+            android:src="@mipmap/water17"
+            android:scaleType="fitCenter" />
+
+        <!-- 旧版 DEMO 角标已停用，保留 id 只是为了兼容现有调参代码。 -->
+        <TextView
+            android:id="@+id/tvWatermarkDemoRibbon"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:background="@drawable/bg_demo_ribbon"
+            android:fontFamily="@font/hy_qi_hei_x2_65w"
+            android:includeFontPadding="false"
+            android:paddingStart="2dp"
+            android:paddingTop="0.5dp"
+            android:paddingEnd="2dp"
+            android:paddingBottom="0dp"
+            android:text="DEMO"
+            android:textColor="#FFFFFFFF"
+            android:textSize="4.6sp"
+            android:translationX="2dp"
+            android:translationY="-2dp"
+            android:visibility="gone" />
+    </FrameLayout>
+
+    <!-- 防伪行：
+         translationX 调大 -> 整个防伪块往右；
+         layout_marginTop 调大 -> 离 water17 更远 -->
+    <LinearLayout
+        android:id="@+id/secureRow"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="3dp"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:translationX="1dp">
+
+        <ImageView
+            android:id="@+id/ivAntiFakeTitle"
+            android:layout_width="10dp"
+            android:layout_height="7dp"
+            android:layout_gravity="center_vertical"
+            android:src="@mipmap/bg_tv_anti_fake"
+            android:scaleType="fitXY" />
+
+        <RelativeLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingLeft="1dp"
+            android:paddingTop="0.25dp"
+            android:clipChildren="false"
+            android:clipToPadding="false">
+
+            <ImageView
+                android:id="@+id/ivAntiFakeCodeShadow"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1dp"
+                android:background="@mipmap/bg_code_shadow"
+                android:layout_alignTop="@id/tvAntiFakeCode"
+                android:layout_alignBottom="@id/tvAntiFakeCode"
+                android:layout_alignStart="@id/tvAntiFakeCode"
+                android:layout_alignEnd="@id/tvAntiFakeCode" />
+
+            <!-- 防伪码：
+                 minWidth 调大 -> 灰底更长；
+                 textSize 调大 -> 字更大；
+                 letterSpacing 调大 -> 字间距更开。
+                 原版 `LRView.b(LRData)` 是 `textW / 100f`，默认从 0 开始。 -->
+            <TextView
+                android:id="@+id/tvAntiFakeCode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="@font/pt_mono_bold"
+                android:includeFontPadding="false"
+                android:letterSpacing="0"
+                android:minWidth="52dp"
+                android:maxLines="1"
+                android:shadowColor="#66000000"
+                android:shadowDx="0"
+                android:shadowDy="0.5"
+                android:shadowRadius="0.5"
+                android:singleLine="true"
+                android:text="ABCDEFGHIJKLMN"
+                android:textColor="#FFFFFFFF"
+                android:textSize="6.2dp" />
+        </RelativeLayout>
+    </LinearLayout>
+
+</LinearLayout>

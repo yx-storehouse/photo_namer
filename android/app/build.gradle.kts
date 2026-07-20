@@ -5,6 +5,16 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val photoNamerTargetAbi =
+    providers.gradleProperty("photoNamerTargetAbi").orNull?.trim()?.takeIf { it.isNotEmpty() }
+val photoNamerAllAbis = listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+val photoNamerExcludedAbiPatterns =
+    photoNamerTargetAbi?.let { targetAbi ->
+        photoNamerAllAbis
+            .filter { abi -> abi != targetAbi }
+            .map { abi -> "lib/$abi/**" }
+    } ?: emptyList()
+
 android {
     namespace = "com.example.photo_namer"
     compileSdk = flutter.compileSdkVersion
@@ -28,6 +38,18 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        if (photoNamerTargetAbi != null) {
+            ndk {
+                abiFilters.add(photoNamerTargetAbi)
+            }
+        }
+    }
+
+    packaging {
+        jniLibs {
+            excludes += photoNamerExcludedAbiPatterns
+        }
     }
 
     buildTypes {
@@ -44,6 +66,12 @@ android {
 }
 
 dependencies {
+    implementation("androidx.appcompat:appcompat:1.7.1")
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
+    implementation("com.google.guava:guava:33.4.8-android")
     implementation("com.google.mlkit:text-recognition-chinese:16.0.0")
 }
 
