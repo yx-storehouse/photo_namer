@@ -108,8 +108,18 @@
 
 ```text
 lib/
-  main.dart                      主流程与大部分页面入口
-  cloud_sync_page.dart           云端同步相关逻辑
+  main.dart                      应用入口与全局主题/路由
+  app_route_observer.dart        全局路由观察者
+  models/                        数据模型(巡检项、抄表、日历、云同步)
+  services/                      业务服务(超标随机浮动、云同步工具、
+                                 Gitee 客户端、应用更新、JSON 文件存储)
+  pages/
+    home/                        首页工作台
+    camera/                      拍照页
+    meter/                       动力抄表、超标、锁定设备、OCR 相机
+    calendar/                    巡检日历(新旧两版)
+  widgets/                       通用组件(ExpandableFab、房间卡片等)
+  cloud_sync_page.dart           云端同步页
   watermark_template_118.dart    水印模板与绘制逻辑
   capture_weather_service.dart   天气获取
   capture_location_service.dart  地址定位
@@ -119,6 +129,10 @@ csv/                             五套动力超标时段数据
 docs/                            设计与发布说明文档
 tool/                            打包、发布、修复云端清单脚本
 ```
+
+说明：大体量数据集(房间模板、抄表数据、超标模板、巡检记录)存储在应用
+文档目录 `photo_namer_data/` 下的独立 JSON 文件中，首次启动会自动从
+SharedPreferences 迁移历史数据；SharedPreferences 仅保留轻量开关与参数。
 
 ## 本地开发
 

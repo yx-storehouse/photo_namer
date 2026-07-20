@@ -13,6 +13,7 @@ import 'package:flutter/services.dart' show FilteringTextInputFormatter, rootBun
 import 'package:photo_namer/models/meter_models.dart';
 import 'package:photo_namer/pages/meter/meter_locked_devices_page.dart';
 import 'package:photo_namer/rikka_page_transitions.dart';
+import 'package:photo_namer/services/json_document_store.dart';
 import 'package:photo_namer/services/meter_overload_logic.dart' as overload;
 
 class MeterOverloadPage extends StatefulWidget {
@@ -74,7 +75,11 @@ class _MeterOverloadPageState extends State<MeterOverloadPage> {
     try {
       final datasets = <MeterTimeSlotDataset>[];
       final prefs = await SharedPreferences.getInstance();
-      final stored = prefs.getString(kPrefMeterOverloadTemplatesKey);
+      final stored = await JsonDocumentStore.instance.read(
+        kDocMeterOverloadTemplates,
+        prefs: prefs,
+        legacyPrefsKey: kPrefMeterOverloadTemplatesKey,
+      );
       if (stored != null && stored.trim().isNotEmpty) {
         final decodedList = jsonDecode(stored);
         if (decodedList is List) {
@@ -352,9 +357,8 @@ class _MeterOverloadPageState extends State<MeterOverloadPage> {
       final nextDatasets = List<MeterTimeSlotDataset>.from(_datasets);
       nextDatasets[_selectedIndex] = updatedDataset;
 
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(
-        kPrefMeterOverloadTemplatesKey,
+      await JsonDocumentStore.instance.write(
+        kDocMeterOverloadTemplates,
         jsonEncode(
           nextDatasets.map(_serializeDatasetEntry).toList(growable: false),
         ),

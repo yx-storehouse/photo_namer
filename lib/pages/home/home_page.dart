@@ -39,6 +39,7 @@ import 'package:photo_namer/raw_capture_material_repository.dart';
 import 'package:photo_namer/rikka_page_transitions.dart';
 import 'package:photo_namer/services/bundled_cloud_data.dart';
 import 'package:photo_namer/services/inspection_zip.dart';
+import 'package:photo_namer/services/json_document_store.dart';
 import 'package:photo_namer/services/json_utils.dart';
 import 'package:photo_namer/watermark_template_118.dart';
 import 'package:photo_namer/widgets/expandable_fab.dart';
@@ -179,6 +180,7 @@ class _HomePageState extends State<HomePage>
   ModalRoute<dynamic>? _route;
   final RawCaptureMaterialRepository _rawCaptureRepository =
       RawCaptureMaterialRepository.instance;
+  final JsonDocumentStore _documentStore = JsonDocumentStore.instance;
   Future<String>? _captureWeatherWarmupFuture;
   bool _didTriggerLaunchWeatherWarmup = false;
   bool _didFinishSessionWeatherWarmup = false;
@@ -260,11 +262,26 @@ class _HomePageState extends State<HomePage>
     final bundledOverloadTemplates = stringKeyedMapList(
       bundledCloudData?['overloadTemplates'],
     );
+    final hasItemsData = await _documentStore.exists(
+      kDocInspectionItems,
+      prefs: prefs,
+      legacyPrefsKey: _prefItemsKey,
+    );
+    final hasMeterRoomsData = await _documentStore.exists(
+      kDocMeterRooms,
+      prefs: prefs,
+      legacyPrefsKey: _prefMeterRoomsKey,
+    );
+    final hasOverloadTemplatesData = await _documentStore.exists(
+      kDocMeterOverloadTemplates,
+      prefs: prefs,
+      legacyPrefsKey: kPrefMeterOverloadTemplatesKey,
+    );
     var shouldPersistBundledDefaults =
         bundledCloudData != null &&
-        (!prefs.containsKey(_prefItemsKey) ||
-            !prefs.containsKey(_prefMeterRoomsKey) ||
-            !prefs.containsKey(kPrefMeterOverloadTemplatesKey) ||
+        (!hasItemsData ||
+            !hasMeterRoomsData ||
+            !hasOverloadTemplatesData ||
             !prefs.containsKey(_prefFolderKey) ||
             !prefs.containsKey(_prefStrategyKey) ||
             !prefs.containsKey(_prefSortByKey) ||
@@ -434,7 +451,11 @@ class _HomePageState extends State<HomePage>
             .clamp(36, 220)
             .toDouble();
 
-    final String? itemsJson = prefs.getString(_prefItemsKey);
+    final String? itemsJson = await _documentStore.read(
+      kDocInspectionItems,
+      prefs: prefs,
+      legacyPrefsKey: _prefItemsKey,
+    );
     if (itemsJson != null) {
       final List<dynamic> decoded = jsonDecode(itemsJson);
       _items = decoded.map((e) => InspectionItem.fromJson(e)).toList();
@@ -448,13 +469,21 @@ class _HomePageState extends State<HomePage>
     }
 
     _inspectionCalendarRecords = decodeInspectionCalendarRecords(
-      prefs.getString(_prefInspectionCalendarRecordsKey),
+      await _documentStore.read(
+        kDocInspectionCalendarRecords,
+        prefs: prefs,
+        legacyPrefsKey: _prefInspectionCalendarRecordsKey,
+      ),
     );
     _inspectionShiftScheduleConfig = decodeInspectionShiftScheduleConfig(
       prefs.getString(_prefInspectionShiftScheduleConfigKey),
     );
 
-    final String? meterRoomsJson = prefs.getString(_prefMeterRoomsKey);
+    final String? meterRoomsJson = await _documentStore.read(
+      kDocMeterRooms,
+      prefs: prefs,
+      legacyPrefsKey: _prefMeterRoomsKey,
+    );
     if (meterRoomsJson != null) {
       final List<dynamic> decoded = jsonDecode(meterRoomsJson);
       _meterRooms = decoded.map((e) => MeterRoom.fromJson(e)).toList();
@@ -465,10 +494,9 @@ class _HomePageState extends State<HomePage>
       shouldPersistBundledDefaults = true;
     }
 
-    if (!prefs.containsKey(kPrefMeterOverloadTemplatesKey) &&
-        bundledOverloadTemplates.isNotEmpty) {
-      await prefs.setString(
-        kPrefMeterOverloadTemplatesKey,
+    if (!hasOverloadTemplatesData && bundledOverloadTemplates.isNotEmpty) {
+      await _documentStore.write(
+        kDocMeterOverloadTemplates,
         jsonEncode(bundledOverloadTemplates),
       );
       shouldPersistBundledDefaults = true;
@@ -1140,8 +1168,8 @@ class _HomePageState extends State<HomePage>
 
   Future<void> _saveData() async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _prefItemsKey,
+    await _documentStore.write(
+      kDocInspectionItems,
       jsonEncode(_items.map((e) => e.toJson()).toList()),
     );
     await prefs.setString(_prefFolderKey, _saveFolderName);
@@ -1215,12 +1243,12 @@ class _HomePageState extends State<HomePage>
       _prefRecentTypeColorsKey,
       jsonEncode(_recentTypeColors),
     );
-    await prefs.setString(
-      _prefMeterRoomsKey,
+    await _documentStore.write(
+      kDocMeterRooms,
       jsonEncode(_meterRooms.map((e) => e.toJson()).toList()),
     );
-    await prefs.setString(
-      _prefInspectionCalendarRecordsKey,
+    await _documentStore.write(
+      kDocInspectionCalendarRecords,
       encodeInspectionCalendarRecords(_inspectionCalendarRecords),
     );
     await prefs.setString(
@@ -1232,7 +1260,11 @@ class _HomePageState extends State<HomePage>
   Future<List<Map<String, dynamic>>>
   _loadEffectiveOverloadTemplateEntries() async {
     final prefs = await SharedPreferences.getInstance();
-    final stored = prefs.getString(kPrefMeterOverloadTemplatesKey);
+    final stored = await _documentStore.read(
+      kDocMeterOverloadTemplates,
+      prefs: prefs,
+      legacyPrefsKey: kPrefMeterOverloadTemplatesKey,
+    );
     if (stored != null && stored.trim().isNotEmpty) {
       final decoded = jsonDecode(stored);
       if (decoded is List) {
@@ -1473,7 +1505,6 @@ class _HomePageState extends State<HomePage>
     }
 
     if (selection.overloadTemplates) {
-      final prefs = await SharedPreferences.getInstance();
       final overloadTemplatesRaw = bundle['overloadTemplates'];
       if (overloadTemplatesRaw is List) {
         final normalized = overloadTemplatesRaw
@@ -1484,8 +1515,8 @@ class _HomePageState extends State<HomePage>
               ),
             )
             .toList();
-        await prefs.setString(
-          kPrefMeterOverloadTemplatesKey,
+        await _documentStore.write(
+          kDocMeterOverloadTemplates,
           jsonEncode(normalized),
         );
       }
