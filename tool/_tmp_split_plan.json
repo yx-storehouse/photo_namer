@@ -1,0 +1,163 @@
+{
+  "source": "lib/main.dart",
+  "importAnchor": "import 'watermark_template_118.dart';",
+  "sourceImports": [
+    "import 'package:photo_namer/app_route_observer.dart';",
+    "import 'package:photo_namer/pages/home/home_page.dart';"
+  ],
+  "commonHeader": [
+    "import 'dart:async';",
+    "import 'dart:convert';",
+    "import 'dart:io';",
+    "import 'dart:math' as math;",
+    "import 'dart:ui' as ui;",
+    "",
+    "import 'package:camera/camera.dart';",
+    "import 'package:flutter/foundation.dart';",
+    "import 'package:flutter/material.dart';",
+    "import 'package:path/path.dart' as path;",
+    "import 'package:permission_handler/permission_handler.dart';",
+    "import 'package:device_info_plus/device_info_plus.dart';",
+    "import 'package:android_intent_plus/android_intent.dart';",
+    "import 'package:shared_preferences/shared_preferences.dart';",
+    "import 'package:file_picker/file_picker.dart';",
+    "import 'package:path_provider/path_provider.dart';",
+    "import 'package:archive/archive_io.dart';",
+    "import 'package:share_plus/share_plus.dart';",
+    "import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';",
+    "import 'package:http/http.dart' as http;",
+    "import 'package:flutter_colorpicker/flutter_colorpicker.dart';",
+    "import 'package:flutter/services.dart' show FilteringTextInputFormatter, rootBundle;",
+    "",
+    "import 'package:photo_namer/app_route_observer.dart';",
+    "import 'package:photo_namer/capture_location_service.dart';",
+    "import 'package:photo_namer/capture_weather_service.dart';",
+    "import 'package:photo_namer/cloud_sync_page.dart';",
+    "import 'package:photo_namer/models/app_enums.dart';",
+    "import 'package:photo_namer/models/camera_capture_result.dart';",
+    "import 'package:photo_namer/models/inspection_calendar.dart';",
+    "import 'package:photo_namer/models/inspection_item.dart';",
+    "import 'package:photo_namer/models/meter_models.dart';",
+    "import 'package:photo_namer/native_watermark_camera_bridge.dart';",
+    "import 'package:photo_namer/native_watermark_camera_panel.dart';",
+    "import 'package:photo_namer/native_watermark_camera_preview.dart';",
+    "import 'package:photo_namer/pages/calendar/inspection_calendar_page.dart';",
+    "import 'package:photo_namer/pages/calendar/inspection_calendar_stat_tile.dart';",
+    "import 'package:photo_namer/pages/calendar/shift_aware_inspection_calendar_page.dart';",
+    "import 'package:photo_namer/pages/camera/camera_page.dart';",
+    "import 'package:photo_namer/pages/home/home_page.dart';",
+    "import 'package:photo_namer/pages/meter/meter_detail_page.dart';",
+    "import 'package:photo_namer/pages/meter/meter_locked_devices_page.dart';",
+    "import 'package:photo_namer/pages/meter/meter_ocr_camera_page.dart';",
+    "import 'package:photo_namer/pages/meter/meter_overload_page.dart';",
+    "import 'package:photo_namer/pages/meter/meter_rooms_page.dart';",
+    "import 'package:photo_namer/raw_capture_batch_page.dart';",
+    "import 'package:photo_namer/raw_capture_material_repository.dart';",
+    "import 'package:photo_namer/rikka_page_transitions.dart';",
+    "import 'package:photo_namer/services/bundled_cloud_data.dart';",
+    "import 'package:photo_namer/services/inspection_zip.dart';",
+    "import 'package:photo_namer/services/json_utils.dart';",
+    "import 'package:photo_namer/watermark_capture_overlay.dart';",
+    "import 'package:photo_namer/watermark_template_118.dart';",
+    "import 'package:photo_namer/widgets/expandable_fab.dart';",
+    "import 'package:photo_namer/widgets/room_card.dart';",
+    "import 'package:photo_namer/widgets/section_header.dart';"
+  ],
+  "extractions": [
+    { "dest": "lib/models/inspection_item.dart", "ranges": [[38, 77, "class InspectionItem {"]] },
+    { "dest": "lib/models/camera_capture_result.dart", "ranges": [[78, 93, "class CameraCaptureResult {"]] },
+    { "dest": "lib/services/inspection_zip.dart", "ranges": [[94, 124, "Future<Map<String, dynamic>> _createInspectionZipInBackground("]] },
+    { "dest": "lib/models/app_enums.dart", "ranges": [[125, 128, "enum ConflictStrategy"]] },
+    { "dest": "lib/app_route_observer.dart", "ranges": [[129, 131, "final RouteObserver<ModalRoute<void>> appRouteObserver"]] },
+    {
+      "dest": "lib/models/meter_models.dart",
+      "ranges": [
+        [132, 132, "const String kPrefMeterOverloadTemplatesKey"],
+        [136, 143, "const List<MeterTimeSlotDefinition> kDefaultMeterTimeSlots"],
+        [481, 569, "class MeterDevice {"],
+        [585, 634, "int nearestMeterTimeSlotIndex("]
+      ]
+    },
+    {
+      "dest": "lib/services/bundled_cloud_data.dart",
+      "ranges": [
+        [133, 135, "const String _bundledCloudDataAssetPath"],
+        [212, 238, "Future<Map<String, dynamic>?> _loadBundledCloudData() async {"]
+      ]
+    },
+    { "dest": "lib/services/json_utils.dart", "ranges": [[144, 211, "Map<String, dynamic> _stringKeyedMap(dynamic raw) {"]] },
+    { "dest": "lib/widgets/expandable_fab.dart", "ranges": [[239, 480, "class FabMenuAction {"]] },
+    {
+      "dest": "lib/models/inspection_calendar.dart",
+      "ranges": [
+        [570, 584, "const List<String> kInspectionCalendarWeekdayLabels"],
+        [635, 1063, "String formatInspectionCalendarDateKey(DateTime date) {"]
+      ]
+    },
+    {
+      "dest": "lib/pages/home/home_page.dart",
+      "ranges": [
+        [1105, 5826, "class _MergedGridSegment {"],
+        [11086, 11375, "class _FloorChip extends StatelessWidget {"]
+      ]
+    },
+    { "dest": "lib/pages/calendar/inspection_calendar_page.dart", "ranges": [[5827, 6513, "class InspectionCalendarPage extends StatefulWidget {"]] },
+    { "dest": "lib/pages/calendar/inspection_calendar_stat_tile.dart", "ranges": [[6514, 6560, "class _InspectionCalendarStatTile extends StatelessWidget {"]] },
+    { "dest": "lib/pages/calendar/shift_aware_inspection_calendar_page.dart", "ranges": [[6561, 7925, "class ShiftAwareInspectionCalendarPage extends StatefulWidget {"]] },
+    { "dest": "lib/pages/meter/meter_rooms_page.dart", "ranges": [[7926, 8363, "class MeterRoomsPage extends StatefulWidget {"]] },
+    { "dest": "lib/pages/meter/meter_overload_page.dart", "ranges": [[8364, 9381, "class MeterOverloadPage extends StatefulWidget {"]] },
+    { "dest": "lib/pages/meter/meter_locked_devices_page.dart", "ranges": [[9382, 9769, "class MeterLockedDevicesPage extends StatefulWidget {"]] },
+    { "dest": "lib/pages/meter/meter_detail_page.dart", "ranges": [[9770, 10899, "class MeterDetailPage extends StatefulWidget {"]] },
+    { "dest": "lib/pages/meter/meter_ocr_camera_page.dart", "ranges": [[10900, 11085, "class MeterOcrCameraPage extends StatefulWidget {"]] },
+    { "dest": "lib/widgets/section_header.dart", "ranges": [[11407, 11429, "class _SectionHeader extends StatelessWidget {"]] },
+    { "dest": "lib/widgets/room_card.dart", "ranges": [[11430, 11538, "class _RoomCard extends StatefulWidget {"]] },
+    { "dest": "lib/pages/camera/camera_page.dart", "ranges": [[11539, 13027, "class CameraPage extends StatefulWidget {"]] }
+  ],
+  "deletions": [
+    [37, 37],
+    [1104, 1104],
+    [11376, 11406]
+  ],
+  "renames": {
+    "_createInspectionZipInBackground": "createInspectionZipInBackground",
+    "_bundledCloudDataAssetPath": "bundledCloudDataAssetPath",
+    "_stringKeyedMap": "stringKeyedMap",
+    "_stringKeyedMapList": "stringKeyedMapList",
+    "_intMapFromJson": "intMapFromJson",
+    "_intListFromJson": "intListFromJson",
+    "_cloudStringDefault": "cloudStringDefault",
+    "_cloudBoolDefault": "cloudBoolDefault",
+    "_cloudIntDefault": "cloudIntDefault",
+    "_cloudDoubleDefault": "cloudDoubleDefault",
+    "_loadBundledCloudData": "loadBundledCloudData",
+    "_bundledInspectionDefaults": "bundledInspectionDefaults",
+    "_InspectionCalendarStatTile": "InspectionCalendarStatTile",
+    "_SectionHeader": "SectionHeader",
+    "_RoomCard": "RoomCard"
+  },
+  "renameFiles": [
+    "lib/main.dart",
+    "lib/models/inspection_item.dart",
+    "lib/models/camera_capture_result.dart",
+    "lib/services/inspection_zip.dart",
+    "lib/models/app_enums.dart",
+    "lib/app_route_observer.dart",
+    "lib/models/meter_models.dart",
+    "lib/services/bundled_cloud_data.dart",
+    "lib/services/json_utils.dart",
+    "lib/widgets/expandable_fab.dart",
+    "lib/models/inspection_calendar.dart",
+    "lib/pages/home/home_page.dart",
+    "lib/pages/calendar/inspection_calendar_page.dart",
+    "lib/pages/calendar/inspection_calendar_stat_tile.dart",
+    "lib/pages/calendar/shift_aware_inspection_calendar_page.dart",
+    "lib/pages/meter/meter_rooms_page.dart",
+    "lib/pages/meter/meter_overload_page.dart",
+    "lib/pages/meter/meter_locked_devices_page.dart",
+    "lib/pages/meter/meter_detail_page.dart",
+    "lib/pages/meter/meter_ocr_camera_page.dart",
+    "lib/widgets/section_header.dart",
+    "lib/widgets/room_card.dart",
+    "lib/pages/camera/camera_page.dart"
+  ]
+}
