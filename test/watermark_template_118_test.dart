@@ -14,11 +14,7 @@ void main() {
     addTearDown(() => tempDir.delete(recursive: true));
 
     final outputPath = path.join(tempDir.path, 'output.jpg');
-    final sourcePath = path.join(
-      Directory.current.parent.path,
-      'watermark_demo_standalone',
-      'preview_118_test.png',
-    );
+    final sourcePath = await _createPreviewSource(tempDir.path);
 
     await WatermarkTemplate118Composer.composePhoto(
       sourcePath: sourcePath,
@@ -99,11 +95,7 @@ void main() {
     }
 
     final outputPath = path.join(outputDir.path, 'alignment_preview.jpg');
-    final sourcePath = path.join(
-      Directory.current.parent.path,
-      'watermark_demo_standalone',
-      'preview_118_test.png',
-    );
+    final sourcePath = await _createPreviewSource(outputDir.path);
 
     await WatermarkTemplate118Composer.composePhoto(
       sourcePath: sourcePath,

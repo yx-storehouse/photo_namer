@@ -13,6 +13,7 @@ import 'package:flutter/services.dart' show FilteringTextInputFormatter, rootBun
 import 'package:photo_namer/models/meter_models.dart';
 import 'package:photo_namer/pages/meter/meter_locked_devices_page.dart';
 import 'package:photo_namer/rikka_page_transitions.dart';
+import 'package:photo_namer/services/meter_overload_logic.dart' as overload;
 
 class MeterOverloadPage extends StatefulWidget {
   final List<MeterRoom> currentRooms;
@@ -177,34 +178,14 @@ class _MeterOverloadPageState extends State<MeterOverloadPage> {
     return '${local.year}-$month-$day $hour:$minute';
   }
 
-  int _decimalPlaces(String raw) {
-    final normalized = raw.trim();
-    final dotIndex = normalized.indexOf('.');
-    if (dotIndex < 0) {
-      return 0;
-    }
-    return normalized.length - dotIndex - 1;
-  }
-
-  String _formatRandomizedValue(double value, String originalRaw) {
-    final decimals = _decimalPlaces(originalRaw);
-    return value.toStringAsFixed(decimals);
-  }
-
-  String _deviceLockKey(
-    MeterTimeSlotDataset dataset,
-    MeterRoom room,
-    MeterDevice device,
-  ) {
-    return '${dataset.slot.label}::${room.roomId}::${device.name}';
-  }
-
   bool _isDeviceLocked(
     MeterTimeSlotDataset dataset,
     MeterRoom room,
     MeterDevice device,
   ) {
-    return _lockedDeviceKeys.contains(_deviceLockKey(dataset, room, device));
+    return _lockedDeviceKeys.contains(
+      overload.deviceLockKey(dataset, room, device),
+    );
   }
 
   int _lockedDeviceCountForDataset(MeterTimeSlotDataset dataset) {
@@ -217,24 +198,6 @@ class _MeterOverloadPageState extends State<MeterOverloadPage> {
       }
     }
     return count;
-  }
-
-  List<Map<String, dynamic>> _lockedDeviceSummariesForDataset(
-    MeterTimeSlotDataset dataset,
-  ) {
-    final summaries = <Map<String, dynamic>>[];
-    for (final room in dataset.rooms) {
-      for (final device in room.devices) {
-        if (_isDeviceLocked(dataset, room, device)) {
-          summaries.add({
-            'roomId': room.roomId,
-            'roomName': room.roomName,
-            'deviceName': device.name,
-          });
-        }
-      }
-    }
-    return summaries;
   }
 
   MeterRoom _cloneMeterRoom(MeterRoom room) {
@@ -272,67 +235,18 @@ class _MeterOverloadPageState extends State<MeterOverloadPage> {
     return (downPercent: down, upPercent: up);
   }
 
-  String _randomizeCurrentValue(
-    String raw,
-    double downPercent,
-    double upPercent,
-  ) {
-    final original = double.tryParse(raw.trim());
-    if (original == null || original == 0) {
-      return raw;
-    }
-
-    final minFactor = math.max(0.0, 1 - downPercent / 100);
-    final maxFactor = 1 + upPercent / 100;
-    final factor = minFactor + _random.nextDouble() * (maxFactor - minFactor);
-    final randomized = math.max(0.0, original * factor);
-    return _formatRandomizedValue(randomized, raw);
-  }
-
   Map<String, dynamic> _buildRandomizedPayload(
     MeterTimeSlotDataset dataset, {
     required double downPercent,
     required double upPercent,
   }) {
-    int randomizedValueCount = 0;
-    final lockedDeviceSummaries = _lockedDeviceSummariesForDataset(dataset);
-    final randomizedRooms = dataset.rooms.map((room) {
-      return {
-        'roomId': room.roomId,
-        'roomName': room.roomName,
-        'roomType': room.roomType,
-        'location': room.location,
-        'devices': room.devices.map((device) {
-          final values = List<String>.from(device.values);
-          if (!_isDeviceLocked(dataset, room, device)) {
-            for (int i = 3; i <= 5 && i < values.length; i++) {
-              final oldValue = values[i];
-              final newValue = _randomizeCurrentValue(
-                oldValue,
-                downPercent,
-                upPercent,
-              );
-              if (newValue != oldValue) {
-                randomizedValueCount++;
-              }
-              values[i] = newValue;
-            }
-          }
-          return {'name': device.name, 'values': values};
-        }).toList(),
-      };
-    }).toList();
-
-    final payload = Map<String, dynamic>.from(dataset.rawData);
-    payload['rooms'] = randomizedRooms;
-    payload['selectedTimeSlot'] = dataset.slot.label;
-    payload['randomized'] = true;
-    payload['randomizedAt'] = DateTime.now().toIso8601String();
-    payload['randomizedValueCount'] = randomizedValueCount;
-    payload['lockedDeviceCount'] = lockedDeviceSummaries.length;
-    payload['lockedDevices'] = lockedDeviceSummaries;
-    payload['randomRangePercent'] = {'down': downPercent, 'up': upPercent};
-    return payload;
+    return overload.buildRandomizedPayload(
+      dataset,
+      downPercent: downPercent,
+      upPercent: upPercent,
+      lockedDeviceKeys: _lockedDeviceKeys,
+      random: _random,
+    );
   }
 
   Map<String, dynamic> _serializeDatasetEntry(MeterTimeSlotDataset dataset) {
@@ -369,19 +283,7 @@ class _MeterOverloadPageState extends State<MeterOverloadPage> {
     MeterTimeSlotDataset dataset,
     Set<String> source,
   ) {
-    final validKeys = <String>{};
-    for (final room in dataset.rooms) {
-      for (final device in room.devices) {
-        validKeys.add(_deviceLockKey(dataset, room, device));
-      }
-    }
-
-    return source.where((key) {
-      if (!key.startsWith('${dataset.slot.label}::')) {
-        return true;
-      }
-      return validKeys.contains(key);
-    }).toSet();
+    return overload.pruneLockedKeysForDataset(dataset, source);
   }
 
   Future<bool> _confirmWriteCurrentRoomsToSelectedSlot(
