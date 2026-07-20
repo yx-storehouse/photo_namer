@@ -1,6 +1,5 @@
 package com.example.photo_namer
 
-import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -20,10 +19,8 @@ class MainActivity : FlutterActivity() {
         private const val CHANNEL = "photo_namer/native_watermark_camera"
         private const val APP_UPDATE_CHANNEL = "photo_namer/app_update"
         private const val NATIVE_PREVIEW_VIEW_TYPE = "photo_namer/native_camera_preview"
-        private const val REQUEST_NATIVE_CAMERA = 11817
     }
 
-    private var pendingResult: MethodChannel.Result? = null
     private lateinit var nativeWatermarkChannel: MethodChannel
     private lateinit var appUpdateChannel: MethodChannel
     private val batchComposeExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -43,7 +40,6 @@ class MainActivity : FlutterActivity() {
         nativeWatermarkChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
         nativeWatermarkChannel.setMethodCallHandler { call, result ->
             when (call.method) {
-                "launchWatermark118Camera" -> launchNativeWatermarkCamera(call, result)
                 "composeWatermark118Batch" -> composeWatermark118Batch(call, result)
                 else -> result.notImplemented()
             }
@@ -66,27 +62,6 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         batchComposeExecutor.shutdown()
         super.onDestroy()
-    }
-
-    private fun launchNativeWatermarkCamera(call: MethodCall, result: MethodChannel.Result) {
-        if (pendingResult != null) {
-            result.error("camera_busy", "Native watermark camera is already active.", null)
-            return
-        }
-
-        pendingResult = result
-        startActivityForResult(
-            NativeWatermarkCameraActivity.createIntent(
-                context = this,
-                title = call.argument<String>("title").orEmpty(),
-                captureCount = call.argument<Int>("captureCount") ?: 1,
-                roomCode = call.argument<String>("roomCode").orEmpty(),
-                location = call.argument<String>("location").orEmpty(),
-                weatherText = call.argument<String>("weatherText").orEmpty(),
-                imprintText = call.argument<String>("imprintText").orEmpty(),
-            ),
-            REQUEST_NATIVE_CAMERA,
-        )
     }
 
     private fun composeWatermark118Batch(call: MethodCall, result: MethodChannel.Result) {
@@ -193,21 +168,4 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQUEST_NATIVE_CAMERA) {
-            return
-        }
-
-        val result = pendingResult ?: return
-        pendingResult = null
-
-        if (resultCode != Activity.RESULT_OK) {
-            result.success(null)
-            return
-        }
-
-        result.success(data?.getStringExtra(NativeWatermarkCameraActivity.EXTRA_RESULT_JSON))
-    }
 }

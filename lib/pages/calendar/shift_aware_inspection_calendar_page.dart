@@ -1047,7 +1047,7 @@ class _ShiftAwareInspectionCalendarPageState
                       ? '首次轮值日期不能是休息日，请重新选择。'
                       : _firstInspectionShiftType == InspectionShiftType.night
                       ? '首次轮值是晚班，请再选一个起始时段。'
-                      : '首次轮值班次：${inspectionShiftTypeLabel(_firstInspectionShiftType)}，起始时段会自动固定为 ${_firstInspectionSlotLabel}。',
+                      : '首次轮值班次：${inspectionShiftTypeLabel(_firstInspectionShiftType)}，起始时段会自动固定为 $_firstInspectionSlotLabel。',
                   style: const TextStyle(
                     fontSize: 12,
                     color: Color(0xFF667085),

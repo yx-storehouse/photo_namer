@@ -312,18 +312,22 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
           builder: (context, setStateDialog) => SizedBox(
             width: 360,
             height: 420,
-            child: ListView.builder(
-              itemCount: candidates.length,
-              itemBuilder: (context, index) {
-                final it = candidates[index];
-                return RadioListTile<int>(
-                  value: it.id,
-                  groupValue: selected?.id,
-                  onChanged: (_) => setStateDialog(() => selected = it),
-                  title: Text(it.serial),
-                  subtitle: Text('${it.location} · ${it.type}'),
-                );
-              },
+            child: RadioGroup<int>(
+              groupValue: selected?.id,
+              onChanged: (value) => setStateDialog(() {
+                selected = candidates.firstWhere((it) => it.id == value);
+              }),
+              child: ListView.builder(
+                itemCount: candidates.length,
+                itemBuilder: (context, index) {
+                  final it = candidates[index];
+                  return RadioListTile<int>(
+                    value: it.id,
+                    title: Text(it.serial),
+                    subtitle: Text('${it.location} · ${it.type}'),
+                  );
+                },
+              ),
             ),
           ),
         ),

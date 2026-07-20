@@ -4,50 +4,61 @@
 
 ## 1. 当前主链路
 
-- 原生拍照页: `android/app/src/main/kotlin/com/example/photo_namer/NativeWatermarkCameraActivity.kt`
-- 预览外层布局: `android/app/src/main/res/layout/activity_native_watermark_camera.xml`
+水印渲染只有一条原生链路(内嵌 PlatformView 预览 + 离屏批量合成)，共用同一套布局与参数:
+
+- 内嵌原生预览: `android/app/src/main/kotlin/com/example/photo_namer/NativeWatermarkCameraPlatformView.kt`
+- 离屏批量合成: `android/app/src/main/kotlin/com/example/photo_namer/NativeWatermarkBatchComposer.kt`
+- 共享微调参数/防伪码/验证文案拆分: `android/app/src/main/kotlin/com/example/photo_namer/WatermarkShared.kt`
+- 预览外层布局(两条链路共用): `android/app/src/main/res/layout/view_native_watermark_camera_preview.xml`
 - 左下 118 主模板: `android/app/src/main/res/layout/view_watermark_118_left.xml`
 - 右下角标模板 17: `android/app/src/main/res/layout/view_watermark_lr17.xml`
 - 时间描边渐变字: `android/app/src/main/kotlin/com/example/photo_namer/ui/GradientStrokeTextView.kt`
 - 预览固定比例容器: `android/app/src/main/kotlin/com/example/photo_namer/ui/FixedAspectFrameLayout.kt`
+- Flutter 端调参面板: `lib/native_watermark_camera_panel.dart`(通过 PlatformView 通道读写下面这些参数)
+
+历史说明: 旧的全屏原生拍照页 `NativeWatermarkCameraActivity` 已在重构中退役删除
+(它自带的"参数/调节"弹窗也一并删除)，调参统一走 Flutter 端面板。
 
 ## 2. 当前统一画布
 
 - 预览和导出统一使用 `1920 x 2560`
 - 比例为 `3:4`
 - 预览容器比例由 `FixedAspectFrameLayout` 控制
-- 导出时如果原图不是 `3:4`，会先在 `NativeWatermarkCameraActivity.normalizeCapturedBitmap()` 里裁成 `3:4`，再缩放到 `1920 x 2560`
+- 导出时如果原图不是 `3:4`，会先在各自的 `normalizeCapturedBitmap()` 里裁成 `3:4`，再缩放到 `1920 x 2560`
 
 ## 3. 你最常会改的参数
 
 ### 3.0 当前推荐默认值
 
-这组值已经同步到 `NativeWatermarkCameraActivity.WatermarkAdjustments()`，点拍照页里的 `恢复默认` 就会回到这套基线。
+这组值定义在 `WatermarkShared.kt` 的 `WatermarkAdjustments`，预览与批量合成共用;
+点调参面板里的 `恢复默认` 就会回到这套基线。
 
 - 左边距: `18.0dp`
 - 右边距: `18.0dp`
 - 底边距: `9.0dp`
+- 地址列宽: `265.0dp`
 - 左侧整体缩放: `1.0`
 - 左侧整体 X: `-12.9dp`
-- 左侧整体 Y: `3.5dp`
-- 时间字大小: `23.0dp`
-- 时间字发光: `2.2dp`
+- 左侧整体 Y: `3.3dp`
+- 时间字大小: `25.0dp`
+- 时间字发光: `0.5dp`
 - 时间字 X: `3.4dp`
 - 时间字 Y: `-0.7dp`
 - 右侧整体缩放: `1.0`
 - 右侧整体 X: `13.8dp`
-- 右侧整体 Y: `6.6dp`
-- 防伪块 X: `-3.4dp`
-- 防伪块 Y: `0.0dp`
-- 备注块高度: `6.0dp`
-- 备注字体大小: `12.0sp`
+- 右侧整体 Y: `6.8dp`
+- 防伪块 X: `3.0dp`
+- 防伪块 Y: `-1.6dp`
+- 防伪码字号: `5.0dp`
+- 备注块竖向内边距: `7.0dp`
+- 备注字体大小: `14.0sp`
 - 盾牌宽度: `12.0sp`
 - 盾牌高度: `14.0sp`
 - 验证文字大小: `12.0sp`
 
 ### 3.1 整体左右边距
 
-文件: `android/app/src/main/res/layout/activity_native_watermark_camera.xml`
+文件: `android/app/src/main/res/layout/view_native_watermark_camera_preview.xml`
 
 - `watermarkAnchor.paddingStart`
 - `watermarkAnchor.paddingEnd`
@@ -171,8 +182,8 @@
 
 真实运行逻辑现在也在代码里做了拆分:
 
-- `NativeWatermarkCameraActivity.bindImprintText()`
-- `NativeWatermarkCameraActivity.parseImprintParts()`
+- `WatermarkShared.kt` 里的顶层函数 `parseImprintParts()`(两条链路共用)
+- 各自的 `bindImprintText()` 负责把拆分结果绑到视图
 
 说明:
 
@@ -235,7 +246,7 @@
 
 ## 4. 当前可直接手动调的内容
 
-现在拍照预览页顶部有一个 `参数` 按钮，可以直接改这些文案:
+拍照页的水印面板(Flutter 端 `lib/native_watermark_camera_panel.dart`)可以直接改这些文案:
 
 - 地址
 - 时间
@@ -250,22 +261,16 @@
 - 时间和日期留空时，会自动跟随当前系统时间
 - 防伪码留空时，会重新随机生成 14 位
 - 点 `恢复默认` 会恢复为进入相机时的默认参数
-- 顶部 `定位天气` 按钮会申请定位权限，并刷新真实地址与实时天气
-
-相关文件:
-
-- `android/app/src/main/res/layout/dialog_watermark_params.xml`
-- `android/app/src/main/kotlin/com/example/photo_namer/NativeWatermarkCameraActivity.kt`
+- `定位天气` 会申请定位权限，并刷新真实地址与实时天气
 
 ## 4.1 当前可直接拖动的调节面板
 
-现在拍照预览页顶部还有一个 `调节` 按钮，会打开实时滑杆面板。
+水印面板里的滑杆调节实时作用到原生预览。
 
 真实参数定义位置:
 
-- `android/app/src/main/kotlin/com/example/photo_namer/NativeWatermarkCameraActivity.kt`
-- 关键结构体: `WatermarkAdjustments`
-- 真正生效位置: `applyWatermarkAdjustments()`
+- 参数结构体: `android/app/src/main/kotlin/com/example/photo_namer/WatermarkShared.kt` 的 `WatermarkAdjustments`
+- 真正生效位置: `NativeWatermarkCameraPlatformView.applyWatermarkAdjustments()` 与 `NativeWatermarkBatchComposer.applyWatermarkAdjustments()`
 
 当前滑杆包括:
 
@@ -321,6 +326,6 @@
 
 如果后面你要继续往下抠，优先看:
 
-- `NativeWatermarkCameraActivity.composeWatermarkedPhoto()`
-- `NativeWatermarkCameraActivity.normalizeCapturedBitmap()`
+- `NativeWatermarkCameraPlatformView.composeWatermarkedPhoto()`
+- `NativeWatermarkCameraPlatformView.normalizeCapturedBitmap()`
 - `PreviewView` 实际裁切区域和最终导出裁切区域是否完全同构

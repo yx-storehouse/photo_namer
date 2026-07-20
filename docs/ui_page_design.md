@@ -883,7 +883,7 @@ OCR 模式分为：
 
 ### 页面定位
 
-当前实际使用的是 `ShiftAwareInspectionCalendarPage`，不是旧版 `InspectionCalendarPage`。这个页面已经包含“个人轮值巡检计划”和“时段记录”两部分。
+当前实际使用的是 `ShiftAwareInspectionCalendarPage`(旧版 `InspectionCalendarPage` 已在重构中删除)。这个页面已经包含“个人轮值巡检计划”和“时段记录”两部分。
 
 ### 页面目标
 
@@ -1040,6 +1040,6 @@ OCR 模式分为：
 
 ## 7. 备注
 
-- 当前巡检页存在旧版 `InspectionCalendarPage`，但实际主入口已经切到 `ShiftAwareInspectionCalendarPage`，后续 UI 设计建议只围绕新版做。
+- 巡检日历只保留 `ShiftAwareInspectionCalendarPage`(旧版 `InspectionCalendarPage` 已删除)，后续 UI 设计只围绕它做。
 - 首页设置功能当前过多堆积在一个底部面板里，后续很适合单独拆成“应用设置页”。
 - 云同步页功能非常多，最适合拆成多模块式控制台，不建议继续堆成长列表。

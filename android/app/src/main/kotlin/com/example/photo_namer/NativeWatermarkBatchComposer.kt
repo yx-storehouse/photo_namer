@@ -29,18 +29,11 @@ import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
-import kotlin.random.Random
 
 internal class NativeWatermarkBatchComposer(private val activity: Activity) {
 
-    companion object {
-        private const val PREFS_NAME = "watermark_118_debug_prefs"
-        private const val TUNING_DEFAULTS_VERSION_KEY = "tuning_defaults_version"
-        private const val TUNING_DEFAULTS_VERSION = 3
-    }
-
     private val prefs: SharedPreferences by lazy {
-        activity.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        activity.getSharedPreferences(WatermarkAdjustments.PREFS_NAME, Context.MODE_PRIVATE)
     }
     private val targetCaptureSize = Size(1920, 2560)
     private val initLatch = CountDownLatch(1)
@@ -343,75 +336,7 @@ internal class NativeWatermarkBatchComposer(private val activity: Activity) {
     }
 
     private fun loadPersistedAdjustments() {
-        val storedDefaultsVersion = prefs.getInt(TUNING_DEFAULTS_VERSION_KEY, 0)
-        if (storedDefaultsVersion < TUNING_DEFAULTS_VERSION) {
-            watermarkAdjustments = WatermarkAdjustments()
-            return
-        }
-
-        val defaults = WatermarkAdjustments()
-        watermarkAdjustments = WatermarkAdjustments(
-            anchorStartDp = loadFloatPref("anchor_start_dp", defaults.anchorStartDp),
-            anchorEndDp = loadFloatPref("anchor_end_dp", defaults.anchorEndDp),
-            anchorBottomDp = loadFloatPref("anchor_bottom_dp", defaults.anchorBottomDp),
-            locationColumnWidthDp = loadFloatPref(
-                "location_column_width_dp",
-                defaults.locationColumnWidthDp,
-            ),
-            leftScale = loadFloatPref("left_scale", defaults.leftScale),
-            leftXdp = loadFloatPref("left_x_dp", defaults.leftXdp),
-            leftYdp = loadFloatPref("left_y_dp", defaults.leftYdp),
-            timeTextSizeDp = loadFloatPref("time_text_size_dp", defaults.timeTextSizeDp),
-            timeGlowRadiusDp = loadFloatPref("time_glow_radius_dp", defaults.timeGlowRadiusDp),
-            timeXdp = loadFloatPref("time_x_dp", defaults.timeXdp),
-            timeYdp = loadFloatPref("time_y_dp", defaults.timeYdp),
-            rightScale = loadFloatPref("right_scale", defaults.rightScale),
-            rightXdp = loadFloatPref("right_x_dp", defaults.rightXdp),
-            rightYdp = loadFloatPref("right_y_dp", defaults.rightYdp),
-            secureXdp = loadFloatPref("secure_x_dp", defaults.secureXdp),
-            secureYdp = loadFloatPref("secure_y_dp", defaults.secureYdp),
-            secureCodeTextSizeDp = loadFloatPref(
-                "secure_code_text_size_dp",
-                defaults.secureCodeTextSizeDp,
-            ),
-            secureTitleScale = loadFloatPref("secure_title_scale", defaults.secureTitleScale),
-            secureShadowScaleX = loadFloatPref(
-                "secure_shadow_scale_x",
-                defaults.secureShadowScaleX,
-            ),
-            secureShadowScaleY = loadFloatPref(
-                "secure_shadow_scale_y",
-                defaults.secureShadowScaleY,
-            ),
-            secureShadowXdp = loadFloatPref("secure_shadow_x_dp", defaults.secureShadowXdp),
-            secureShadowYdp = loadFloatPref("secure_shadow_y_dp", defaults.secureShadowYdp),
-            secureCodeSpacingValue = loadFloatPref(
-                "secure_code_spacing_value",
-                defaults.secureCodeSpacingValue,
-            ),
-            demoXdp = loadFloatPref("demo_x_dp", defaults.demoXdp),
-            demoYdp = loadFloatPref("demo_y_dp", defaults.demoYdp),
-            roomCodeVerticalPaddingDp = loadFloatPref(
-                "room_code_vertical_padding_dp",
-                defaults.roomCodeVerticalPaddingDp,
-            ),
-            roomCodeTextSizeSp = loadFloatPref(
-                "room_code_text_size_sp",
-                defaults.roomCodeTextSizeSp,
-            ),
-            imprintIconWidthSp = loadFloatPref(
-                "imprint_icon_width_sp",
-                defaults.imprintIconWidthSp,
-            ),
-            imprintIconHeightSp = loadFloatPref(
-                "imprint_icon_height_sp",
-                defaults.imprintIconHeightSp,
-            ),
-            imprintTextSizeSp = loadFloatPref(
-                "imprint_text_size_sp",
-                defaults.imprintTextSizeSp,
-            ),
-        )
+        watermarkAdjustments = WatermarkAdjustments.loadFromPrefs(prefs)
     }
 
     private fun bindImprintText(rawValue: String) {
@@ -427,33 +352,6 @@ internal class NativeWatermarkBatchComposer(private val activity: Activity) {
             imprintDividerView.text = ""
             imprintSuffixView.text = ""
         }
-    }
-
-    private fun parseImprintParts(rawValue: String): ImprintParts {
-        val trimmedValue = rawValue.trim()
-        if (trimmedValue.isEmpty()) {
-            return ImprintParts("", null, null)
-        }
-
-        val pipeIndex = trimmedValue.indexOf('|')
-        if (pipeIndex in 1 until trimmedValue.lastIndex) {
-            return ImprintParts(
-                prefix = trimmedValue.substring(0, pipeIndex).trim(),
-                divider = "I",
-                suffix = trimmedValue.substring(pipeIndex + 1).trim(),
-            )
-        }
-
-        val spacedDividerMatch = Regex("^(.*?)(\\s+[I丨｜]\\s+)(.+)$").find(trimmedValue)
-        if (spacedDividerMatch != null) {
-            return ImprintParts(
-                prefix = spacedDividerMatch.groupValues[1].trim(),
-                divider = spacedDividerMatch.groupValues[2].trim().replace("|", "I"),
-                suffix = spacedDividerMatch.groupValues[3].trim(),
-            )
-        }
-
-        return ImprintParts(trimmedValue, null, null)
     }
 
     private fun composeWatermarkedPhoto(sourceFile: File, overlayBitmap: Bitmap, outputFile: File) {
@@ -572,23 +470,6 @@ internal class NativeWatermarkBatchComposer(private val activity: Activity) {
             croppedBitmap.recycle()
         }
         return scaledBitmap
-    }
-
-    private fun generateAntiFakeCode(length: Int = 14): String {
-        val alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        return buildString(length) {
-            repeat(length) {
-                append(alphabet[Random.nextInt(alphabet.length)])
-            }
-        }
-    }
-
-    private fun loadFloatPref(key: String, defaultValue: Float): Float {
-        return try {
-            prefs.getFloat(key, defaultValue)
-        } catch (_: ClassCastException) {
-            prefs.getInt(key, defaultValue.roundToInt()).toFloat()
-        }
     }
 
     private fun formatLocationText(rawValue: String, maxWidthPx: Float): String {
@@ -719,42 +600,4 @@ internal class NativeWatermarkBatchComposer(private val activity: Activity) {
         }
     }
 
-    private data class WatermarkAdjustments(
-        val anchorStartDp: Float = 18f,
-        val anchorEndDp: Float = 18f,
-        val anchorBottomDp: Float = 9f,
-        val locationColumnWidthDp: Float = 265f,
-        val leftScale: Float = 1f,
-        val leftXdp: Float = -12.9f,
-        val leftYdp: Float = 3.3f,
-        val timeTextSizeDp: Float = 25f,
-        val timeGlowRadiusDp: Float = 0.5f,
-        val timeXdp: Float = 3.4f,
-        val timeYdp: Float = -0.7f,
-        val rightScale: Float = 1f,
-        val rightXdp: Float = 13.8f,
-        val rightYdp: Float = 6.8f,
-        val secureXdp: Float = 3.0f,
-        val secureYdp: Float = -1.6f,
-        val secureCodeTextSizeDp: Float = 5f,
-        val secureTitleScale: Float = 1f,
-        val secureShadowScaleX: Float = 0.7f,
-        val secureShadowScaleY: Float = 1f,
-        val secureShadowXdp: Float = -7.2f,
-        val secureShadowYdp: Float = 0f,
-        val secureCodeSpacingValue: Float = 0f,
-        val demoXdp: Float = 2f,
-        val demoYdp: Float = -2f,
-        val roomCodeVerticalPaddingDp: Float = 7f,
-        val roomCodeTextSizeSp: Float = 14f,
-        val imprintIconWidthSp: Float = 12f,
-        val imprintIconHeightSp: Float = 14f,
-        val imprintTextSizeSp: Float = 12f,
-    )
-
-    private data class ImprintParts(
-        val prefix: String,
-        val divider: String?,
-        val suffix: String?,
-    )
 }

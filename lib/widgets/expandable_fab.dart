@@ -97,8 +97,9 @@ class _ExpandableFabState extends State<ExpandableFab>
       return;
     }
     if (_controller.status == AnimationStatus.forward ||
-        _controller.status == AnimationStatus.reverse)
+        _controller.status == AnimationStatus.reverse) {
       return;
+    }
     if (_open) {
       await _controller.reverse();
     } else {

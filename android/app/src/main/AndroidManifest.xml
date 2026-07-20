@@ -15,11 +15,6 @@
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
-            android:name=".NativeWatermarkCameraActivity"
-            android:exported="false"
-            android:screenOrientation="portrait"
-            android:theme="@style/NativeCameraTheme" />
-        <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"

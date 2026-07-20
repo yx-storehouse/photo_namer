@@ -60,7 +60,6 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
     0.14,
   );
 
-  static const String _baiduAppId = '7473614';
   static const String _baiduApiKey = 'GOiAIygVECnMVJWnpQGcBbNs';
   static const String _baiduSecretKey = 's7nnGZ9mhNv8in2b7eyjm0g3zjrhXUqv';
   static const String _baiduMeterOcrEndpoint =
@@ -346,8 +345,9 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
       final l3 = lines[i + 2];
       if (skipKeyword.hasMatch(l1) ||
           skipKeyword.hasMatch(l2) ||
-          skipKeyword.hasMatch(l3))
+          skipKeyword.hasMatch(l3)) {
         continue;
+      }
 
       final n1 = _numbersFromLine(l1);
       final n2 = _numbersFromLine(l2);
@@ -476,7 +476,7 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
                   width: double.infinity,
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: Colors.lightBlue.withOpacity(0.12),
+                    color: Colors.lightBlue.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: SelectableText(focusText),
@@ -766,6 +766,7 @@ class _MeterDetailPageState extends State<MeterDetailPage> {
     final focusRect = isTransformer
         ? _ocrFocusRectNormalized
         : _singleLineOcrFocusRectNormalized;
+    if (!mounted) return;
     final XFile? photo = await Navigator.push<XFile?>(
       context,
       buildAppRoute(

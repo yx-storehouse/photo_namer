@@ -45,7 +45,6 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
-import kotlin.random.Random
 
 class NativeWatermarkCameraPlatformViewFactory(
     private val activity: android.app.Activity,
@@ -76,18 +75,12 @@ private class NativeWatermarkCameraPlatformView(
     creationParams: Map<String, Any?>,
 ) : PlatformView {
 
-    companion object {
-        private const val PREFS_NAME = "watermark_118_debug_prefs"
-        private const val TUNING_DEFAULTS_VERSION_KEY = "tuning_defaults_version"
-        private const val TUNING_DEFAULTS_VERSION = 3
-    }
-
     private val methodChannel = MethodChannel(
         messenger,
         "photo_namer/native_camera_preview_$viewId",
     )
     private val prefs: SharedPreferences by lazy {
-        activity.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        activity.getSharedPreferences(WatermarkAdjustments.PREFS_NAME, Context.MODE_PRIVATE)
     }
     private val captureExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val rootView = LayoutInflater.from(activity).inflate(
@@ -869,15 +862,6 @@ private class NativeWatermarkCameraPlatformView(
         return previewView.display?.rotation ?: Surface.ROTATION_0
     }
 
-    private fun generateAntiFakeCode(length: Int = 14): String {
-        val alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        return buildString(length) {
-            repeat(length) {
-                append(alphabet[Random.nextInt(alphabet.length)])
-            }
-        }
-    }
-
     private fun currentDisplayTimeText(now: Date): String {
         return timeOverrideText ?: SimpleDateFormat("HH:mm", Locale.CHINA).format(now)
     }
@@ -995,138 +979,35 @@ private class NativeWatermarkCameraPlatformView(
             "anti_fake_value",
             generateAntiFakeCode(),
         ).orEmpty().ifBlank { generateAntiFakeCode() }
-        val storedDefaultsVersion = prefs.getInt(TUNING_DEFAULTS_VERSION_KEY, 0)
-        if (storedDefaultsVersion < TUNING_DEFAULTS_VERSION) {
+        val storedDefaultsVersion = prefs.getInt(
+            WatermarkAdjustments.TUNING_DEFAULTS_VERSION_KEY,
+            0,
+        )
+        if (storedDefaultsVersion < WatermarkAdjustments.TUNING_DEFAULTS_VERSION) {
             watermarkAdjustments = WatermarkAdjustments()
             savePersistedState()
         } else {
-            watermarkAdjustments = WatermarkAdjustments(
-                anchorStartDp = loadFloatPref("anchor_start_dp", WatermarkAdjustments().anchorStartDp),
-                anchorEndDp = loadFloatPref("anchor_end_dp", WatermarkAdjustments().anchorEndDp),
-                anchorBottomDp = loadFloatPref("anchor_bottom_dp", WatermarkAdjustments().anchorBottomDp),
-                locationColumnWidthDp = loadFloatPref(
-                    "location_column_width_dp",
-                    WatermarkAdjustments().locationColumnWidthDp,
-                ),
-                leftScale = loadFloatPref("left_scale", WatermarkAdjustments().leftScale),
-                leftXdp = loadFloatPref("left_x_dp", WatermarkAdjustments().leftXdp),
-                leftYdp = loadFloatPref("left_y_dp", WatermarkAdjustments().leftYdp),
-                timeTextSizeDp = loadFloatPref("time_text_size_dp", WatermarkAdjustments().timeTextSizeDp),
-                timeGlowRadiusDp = loadFloatPref(
-                    "time_glow_radius_dp",
-                    WatermarkAdjustments().timeGlowRadiusDp,
-                ),
-                timeXdp = loadFloatPref("time_x_dp", WatermarkAdjustments().timeXdp),
-                timeYdp = loadFloatPref("time_y_dp", WatermarkAdjustments().timeYdp),
-                rightScale = loadFloatPref("right_scale", WatermarkAdjustments().rightScale),
-                rightXdp = loadFloatPref("right_x_dp", WatermarkAdjustments().rightXdp),
-                rightYdp = loadFloatPref("right_y_dp", WatermarkAdjustments().rightYdp),
-                secureXdp = loadFloatPref("secure_x_dp", WatermarkAdjustments().secureXdp),
-                secureYdp = loadFloatPref("secure_y_dp", WatermarkAdjustments().secureYdp),
-                secureCodeTextSizeDp = loadFloatPref(
-                    "secure_code_text_size_dp",
-                    WatermarkAdjustments().secureCodeTextSizeDp,
-                ),
-                secureTitleScale = loadFloatPref(
-                    "secure_title_scale",
-                    WatermarkAdjustments().secureTitleScale,
-                ),
-                secureShadowScaleX = loadFloatPref(
-                    "secure_shadow_scale_x",
-                    WatermarkAdjustments().secureShadowScaleX,
-                ),
-                secureShadowScaleY = loadFloatPref(
-                    "secure_shadow_scale_y",
-                    WatermarkAdjustments().secureShadowScaleY,
-                ),
-                secureShadowXdp = loadFloatPref(
-                    "secure_shadow_x_dp",
-                    WatermarkAdjustments().secureShadowXdp,
-                ),
-                secureShadowYdp = loadFloatPref(
-                    "secure_shadow_y_dp",
-                    WatermarkAdjustments().secureShadowYdp,
-                ),
-                secureCodeSpacingValue = loadFloatPref(
-                    "secure_code_spacing_value",
-                    WatermarkAdjustments().secureCodeSpacingValue,
-                ),
-                demoXdp = loadFloatPref("demo_x_dp", WatermarkAdjustments().demoXdp),
-                demoYdp = loadFloatPref("demo_y_dp", WatermarkAdjustments().demoYdp),
-                roomCodeVerticalPaddingDp = loadFloatPref(
-                    "room_code_vertical_padding_dp",
-                    WatermarkAdjustments().roomCodeVerticalPaddingDp,
-                ),
-                roomCodeTextSizeSp = loadFloatPref(
-                    "room_code_text_size_sp",
-                    WatermarkAdjustments().roomCodeTextSizeSp,
-                ),
-                imprintIconWidthSp = loadFloatPref(
-                    "imprint_icon_width_sp",
-                    WatermarkAdjustments().imprintIconWidthSp,
-                ),
-                imprintIconHeightSp = loadFloatPref(
-                    "imprint_icon_height_sp",
-                    WatermarkAdjustments().imprintIconHeightSp,
-                ),
-                imprintTextSizeSp = loadFloatPref(
-                    "imprint_text_size_sp",
-                    WatermarkAdjustments().imprintTextSizeSp,
-                ),
-            )
+            watermarkAdjustments = WatermarkAdjustments.loadFromPrefs(prefs)
         }
     }
 
     private fun savePersistedState() {
         syncEffectiveLocationWeather()
-        prefs.edit()
-            .remove("location_value")
-            .remove("weather_value")
-            .remove("location_manual_override")
-            .remove("weather_manual_override")
-            .remove("location_auto_value")
-            .remove("weather_auto_value")
-            .remove("room_code_value")
-            .remove("imprint_value")
-            .remove("time_override_value")
-            .remove("date_override_value")
-            .putBoolean("anti_fake_locked", antiFakeCodeLocked)
-            .putString("anti_fake_value", previewAntiFakeCode)
-            .putFloat("anchor_start_dp", watermarkAdjustments.anchorStartDp)
-            .putFloat("anchor_end_dp", watermarkAdjustments.anchorEndDp)
-            .putFloat("anchor_bottom_dp", watermarkAdjustments.anchorBottomDp)
-            .putFloat("location_column_width_dp", watermarkAdjustments.locationColumnWidthDp)
-            .putFloat("left_scale", watermarkAdjustments.leftScale)
-            .putFloat("left_x_dp", watermarkAdjustments.leftXdp)
-            .putFloat("left_y_dp", watermarkAdjustments.leftYdp)
-            .putFloat("time_text_size_dp", watermarkAdjustments.timeTextSizeDp)
-            .putFloat("time_glow_radius_dp", watermarkAdjustments.timeGlowRadiusDp)
-            .putFloat("time_x_dp", watermarkAdjustments.timeXdp)
-            .putFloat("time_y_dp", watermarkAdjustments.timeYdp)
-            .putFloat("right_scale", watermarkAdjustments.rightScale)
-            .putFloat("right_x_dp", watermarkAdjustments.rightXdp)
-            .putFloat("right_y_dp", watermarkAdjustments.rightYdp)
-            .putFloat("secure_x_dp", watermarkAdjustments.secureXdp)
-            .putFloat("secure_y_dp", watermarkAdjustments.secureYdp)
-            .putFloat("secure_code_text_size_dp", watermarkAdjustments.secureCodeTextSizeDp)
-            .putFloat("secure_title_scale", watermarkAdjustments.secureTitleScale)
-            .putFloat("secure_shadow_scale_x", watermarkAdjustments.secureShadowScaleX)
-            .putFloat("secure_shadow_scale_y", watermarkAdjustments.secureShadowScaleY)
-            .putFloat("secure_shadow_x_dp", watermarkAdjustments.secureShadowXdp)
-            .putFloat("secure_shadow_y_dp", watermarkAdjustments.secureShadowYdp)
-            .putFloat("secure_code_spacing_value", watermarkAdjustments.secureCodeSpacingValue)
-            .putFloat("demo_x_dp", watermarkAdjustments.demoXdp)
-            .putFloat("demo_y_dp", watermarkAdjustments.demoYdp)
-            .putFloat(
-                "room_code_vertical_padding_dp",
-                watermarkAdjustments.roomCodeVerticalPaddingDp,
-            )
-            .putFloat("room_code_text_size_sp", watermarkAdjustments.roomCodeTextSizeSp)
-            .putFloat("imprint_icon_width_sp", watermarkAdjustments.imprintIconWidthSp)
-            .putFloat("imprint_icon_height_sp", watermarkAdjustments.imprintIconHeightSp)
-            .putFloat("imprint_text_size_sp", watermarkAdjustments.imprintTextSizeSp)
-            .putInt(TUNING_DEFAULTS_VERSION_KEY, TUNING_DEFAULTS_VERSION)
-            .apply()
+        watermarkAdjustments.writeTo(
+            prefs.edit()
+                .remove("location_value")
+                .remove("weather_value")
+                .remove("location_manual_override")
+                .remove("weather_manual_override")
+                .remove("location_auto_value")
+                .remove("weather_auto_value")
+                .remove("room_code_value")
+                .remove("imprint_value")
+                .remove("time_override_value")
+                .remove("date_override_value")
+                .putBoolean("anti_fake_locked", antiFakeCodeLocked)
+                .putString("anti_fake_value", previewAntiFakeCode),
+        ).apply()
     }
 
     private fun persistAntiFakeState() {
@@ -1161,41 +1042,6 @@ private class NativeWatermarkCameraPlatformView(
         } else {
             imprintDividerView.text = ""
             imprintSuffixView.text = ""
-        }
-    }
-
-    private fun parseImprintParts(rawValue: String): ImprintParts {
-        val trimmedValue = rawValue.trim()
-        if (trimmedValue.isEmpty()) {
-            return ImprintParts("", null, null)
-        }
-
-        val pipeIndex = trimmedValue.indexOf('|')
-        if (pipeIndex in 1 until trimmedValue.lastIndex) {
-            return ImprintParts(
-                prefix = trimmedValue.substring(0, pipeIndex).trim(),
-                divider = "I",
-                suffix = trimmedValue.substring(pipeIndex + 1).trim(),
-            )
-        }
-
-        val spacedDividerMatch = Regex("^(.*?)(\\s+[I丨｜]\\s+)(.+)$").find(trimmedValue)
-        if (spacedDividerMatch != null) {
-            return ImprintParts(
-                prefix = spacedDividerMatch.groupValues[1].trim(),
-                divider = spacedDividerMatch.groupValues[2].trim().replace("|", "I"),
-                suffix = spacedDividerMatch.groupValues[3].trim(),
-            )
-        }
-
-        return ImprintParts(trimmedValue, null, null)
-    }
-
-    private fun loadFloatPref(key: String, defaultValue: Float): Float {
-        return try {
-            prefs.getFloat(key, defaultValue)
-        } catch (_: ClassCastException) {
-            prefs.getInt(key, defaultValue.roundToInt()).toFloat()
         }
     }
 
@@ -1330,42 +1176,4 @@ private class NativeWatermarkCameraPlatformView(
             activity.resources.displayMetrics,
         )
 
-    private data class WatermarkAdjustments(
-        val anchorStartDp: Float = 18f,
-        val anchorEndDp: Float = 18f,
-        val anchorBottomDp: Float = 9f,
-        val locationColumnWidthDp: Float = 265f,
-        val leftScale: Float = 1f,
-        val leftXdp: Float = -12.9f,
-        val leftYdp: Float = 3.3f,
-        val timeTextSizeDp: Float = 25f,
-        val timeGlowRadiusDp: Float = 0.5f,
-        val timeXdp: Float = 3.4f,
-        val timeYdp: Float = -0.7f,
-        val rightScale: Float = 1f,
-        val rightXdp: Float = 13.8f,
-        val rightYdp: Float = 6.8f,
-        val secureXdp: Float = 3.0f,
-        val secureYdp: Float = -1.6f,
-        val secureCodeTextSizeDp: Float = 5f,
-        val secureTitleScale: Float = 1f,
-        val secureShadowScaleX: Float = 0.7f,
-        val secureShadowScaleY: Float = 1f,
-        val secureShadowXdp: Float = -7.2f,
-        val secureShadowYdp: Float = 0f,
-        val secureCodeSpacingValue: Float = 0f,
-        val demoXdp: Float = 2f,
-        val demoYdp: Float = -2f,
-        val roomCodeVerticalPaddingDp: Float = 7f,
-        val roomCodeTextSizeSp: Float = 14f,
-        val imprintIconWidthSp: Float = 12f,
-        val imprintIconHeightSp: Float = 14f,
-        val imprintTextSizeSp: Float = 12f,
-    )
-
-    private data class ImprintParts(
-        val prefix: String,
-        val divider: String?,
-        val suffix: String?,
-    )
 }

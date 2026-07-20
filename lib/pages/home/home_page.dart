@@ -530,7 +530,7 @@ class _HomePageState extends State<HomePage>
       if (f != null) floors.add(f);
     }
     final sortedFloors = floors.toList()..sort();
-    _floorLabels = ['全部', ...sortedFloors.map((f) => '${f}层')];
+    _floorLabels = ['全部', ...sortedFloors.map((f) => '$f层')];
 
     // 2. Filter by floor and search
     final q = _searchCtrl.text.trim().toLowerCase();
@@ -2054,8 +2054,9 @@ class _HomePageState extends State<HomePage>
   String _defaultMeterRoomNameTemplate(InspectionItem it) {
     // 房间级模板：默认使用“位置 + 类型 + 编号”作为抄表房间名
     final parts = <String>[];
-    if (it.location.trim().isNotEmpty && it.location != '-')
+    if (it.location.trim().isNotEmpty && it.location != '-') {
       parts.add(it.location.trim());
+    }
     if (it.type.trim().isNotEmpty) parts.add(it.type.trim());
     if (it.serial.trim().isNotEmpty) parts.add(it.serial.trim());
     return parts.isEmpty ? it.name : parts.join('-');
@@ -3547,7 +3548,7 @@ class _HomePageState extends State<HomePage>
                 _items.removeWhere((e) => e.id == item.id);
                 await _saveData();
                 _recalculateDisplayData();
-                if (mounted) Navigator.pop(context);
+                if (context.mounted) Navigator.pop(context);
               },
               child: const Text('删除', style: TextStyle(color: Colors.red)),
             ),
@@ -3575,7 +3576,7 @@ class _HomePageState extends State<HomePage>
               }
               await _saveData();
               _recalculateDisplayData();
-              if (mounted) Navigator.pop(context);
+              if (context.mounted) Navigator.pop(context);
             },
             child: const Text('保存'),
           ),
