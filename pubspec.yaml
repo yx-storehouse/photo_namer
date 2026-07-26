@@ -2,8 +2,7 @@ name: photo_namer
 description: "Photo naming app with presets."
 publish_to: 'none'
 
-version: 1.0.0+1
-
+version: 1.0.10+4005
 environment:
   sdk: ^3.10.4
 
@@ -25,11 +24,47 @@ dependencies:
   cupertino_icons: ^1.0.8
   device_info_plus: ^12.3.0
   android_intent_plus: ^6.0.0
+  google_mlkit_text_recognition: ^0.15.1
+  image_picker: ^1.2.1
+  http: ^1.2.2
+  flutter_colorpicker: ^1.1.0
+  geolocator: ^14.0.2
+  geocoding: ^4.0.0
+  package_info_plus: ^9.0.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/watermark_118/images/dk_102_time_new.png
+    - assets/watermark_118/images/dk_102_time_big_new.png
+    - assets/watermark_118/images/dk_tu2.png
+    - assets/watermark_118/images/water17.png
+    - assets/watermark_118/images/bg_tv_anti_fake.png
+    - assets/watermark_118/images/bg_code_shadow.png
+    - assets/watermark_118/images/imprint_1.png
+    - assets/cloud/photo_namer_cloud_config.json
+    - assets/cloud/photo_namer_cloud_data.json
+    - csv/
+  fonts:
+    - family: BebasDaka
+      fonts:
+        - asset: assets/watermark_118/fonts/BebasDaka.ttf
+    - family: HYQiHei
+      fonts:
+        - asset: assets/watermark_118/fonts/HYQiHeiX2-65W.otf
+    - family: PTMonoBold
+      fonts:
+        - asset: assets/watermark_118/fonts/PTMono-Bold.ttf
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "web/photo_namer.png"
+  adaptive_icon_background: "#2563EB"
+  adaptive_icon_foreground: "web/photo_namer.png"

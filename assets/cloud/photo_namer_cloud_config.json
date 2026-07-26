@@ -1,0 +1,41 @@
+{
+  "appId": "photo_namer",
+  "appName": "photo_namer",
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-19T22:01:04.8352884+08:00",
+  "updatedBy": "admin",
+  "repository": {
+    "owner": "yxnbkls",
+    "name": "storge",
+    "branch": "master"
+  },
+  "configFilePath": "photo_namer/photo_namer_cloud_config.json",
+  "dataFilePath": "photo_namer/photo_namer_cloud_data.json",
+  "categories": [
+    {
+      "id": "inspectionItems",
+      "name": "房间模板"
+    },
+    {
+      "id": "meterRooms",
+      "name": "动力抄表模板"
+    },
+    {
+      "id": "overloadTemplates",
+      "name": "动力超标模板"
+    },
+    {
+      "id": "appPreferences",
+      "name": "应用参数模板"
+    },
+    {
+      "id": "watermarkTemplate",
+      "name": "水印参数模板"
+    }
+  ],
+  "summary": {
+    "inspectionItemCount": 92,
+    "meterRoomCount": 6,
+    "overloadTemplateCount": 5
+  }
+}

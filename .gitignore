@@ -43,3 +43,19 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+Boorusama/
+
+# 嵌套的空 git 仓库,不纳入本仓库
+/p2p/
+
+# 调试与工具临时产物
+/output/
+/.playwright-cli/
+/.codex-remote-attachments/
+/ui_dump.xml
+/main_ui_dump.xml
+/*_debug.png
+/*_check.png
+/*_crop.png
+/*_crop_left.png
+/*_crop_right.png

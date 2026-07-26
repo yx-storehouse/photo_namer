@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/nativeCameraPreviewRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#FF000000"
+    android:clipChildren="false"
+    android:clipToPadding="false">
+
+    <com.example.photo_namer.ui.FixedAspectFrameLayout
+        android:id="@+id/previewFrame"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:clipChildren="false"
+        android:clipToPadding="false">
+
+        <androidx.camera.view.PreviewView
+            android:id="@+id/previewView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:keepScreenOn="true" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@drawable/bg_camera_preview_scrim" />
+
+        <FrameLayout
+            android:id="@+id/watermarkAnchor"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipChildren="false"
+            android:clipToPadding="false"
+            android:paddingStart="18dp"
+            android:paddingEnd="18dp"
+            android:paddingBottom="9dp">
+
+            <include
+                layout="@layout/view_watermark_118_left"
+                android:layout_gravity="bottom|start" />
+
+            <include
+                layout="@layout/view_watermark_lr17"
+                android:layout_gravity="bottom|end" />
+        </FrameLayout>
+
+        <View
+            android:id="@+id/captureFlashOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:alpha="0"
+            android:background="#F7FFFFFF"
+            android:clickable="false"
+            android:focusable="false"
+            android:visibility="gone" />
+    </com.example.photo_namer.ui.FixedAspectFrameLayout>
+
+</FrameLayout>

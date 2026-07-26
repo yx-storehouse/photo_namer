@@ -45,5 +45,7 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>拍照时需要获取当前位置以生成水印中的地点信息。</string>
 </dict>
 </plist>
