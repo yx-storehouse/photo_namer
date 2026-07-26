@@ -2,7 +2,7 @@ name: photo_namer
 description: "Photo naming app with presets."
 publish_to: 'none'
 
-version: 1.0.10+4005
+version: 1.0.10+4006
 environment:
   sdk: ^3.10.4
 
