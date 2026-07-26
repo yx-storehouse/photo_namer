@@ -523,9 +523,12 @@ class _MeterOverloadPageState extends State<MeterOverloadPage> {
       await file.writeAsString(
         const JsonEncoder.withIndent('  ').convert(payload),
       );
-      await Share.shareXFiles([
-        XFile(file.path),
-      ], text: '动力超标 ${dataset.slot.label} 时段数据导出');
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path)],
+          text: '动力超标 ${dataset.slot.label} 时段数据导出',
+        ),
+      );
     } catch (error) {
       if (!mounted) {
         return;
@@ -578,10 +581,12 @@ class _MeterOverloadPageState extends State<MeterOverloadPage> {
       await file.writeAsString(
         const JsonEncoder.withIndent('  ').convert(payload),
       );
-      await Share.shareXFiles(
-        [XFile(file.path)],
-        text:
-            '动力超标 ${dataset.slot.label} 随机浮动数据导出（-${range.downPercent}% / +${range.upPercent}%）',
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path)],
+          text:
+              '动力超标 ${dataset.slot.label} 随机浮动数据导出（-${range.downPercent}% / +${range.upPercent}%）',
+        ),
       );
     } catch (error) {
       if (!mounted) {

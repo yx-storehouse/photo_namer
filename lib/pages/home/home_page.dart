@@ -1126,7 +1126,7 @@ class _HomePageState extends State<HomePage>
 
   Future<void> _pickSaveDirectory(StateSetter setModalState) async {
     try {
-      final dir = await FilePicker.platform.getDirectoryPath(
+      final dir = await FilePicker.getDirectoryPath(
         dialogTitle: '选择保存目录',
       );
       if (dir == null) return;
@@ -1148,7 +1148,7 @@ class _HomePageState extends State<HomePage>
     StateSetter setModalState,
   ) async {
     try {
-      final dir = await FilePicker.platform.getDirectoryPath(
+      final dir = await FilePicker.getDirectoryPath(
         dialogTitle: '选择直拍保存目录',
       );
       if (dir == null) return;
@@ -2690,7 +2690,9 @@ class _HomePageState extends State<HomePage>
         rootNavigator.pop();
         showedProgressDialog = false;
       }
-      await Share.shareXFiles([XFile(zipPath)], text: '巡检照片导出');
+      await SharePlus.instance.share(
+        ShareParams(files: [XFile(zipPath)], text: '巡检照片导出'),
+      );
     } catch (e) {
       if (!mounted) {
         return;

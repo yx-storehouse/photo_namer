@@ -163,7 +163,9 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
         const JsonEncoder.withIndent('  ').convert(data),
       );
 
-      await Share.shareXFiles([XFile(file.path)], text: '抄表设备模板导出');
+      await SharePlus.instance.share(
+        ShareParams(files: [XFile(file.path)], text: '抄表设备模板导出'),
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -174,7 +176,7 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
 
   Future<void> _importRoomConfig() async {
     try {
-      final picked = await FilePicker.platform.pickFiles(
+      final picked = await FilePicker.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['json'],
       );
@@ -222,7 +224,9 @@ class _MeterRoomsPageState extends State<MeterRoomsPage> {
         const JsonEncoder.withIndent('  ').convert(data),
       );
 
-      await Share.shareXFiles([XFile(file.path)], text: '当前抄表数据导出');
+      await SharePlus.instance.share(
+        ShareParams(files: [XFile(file.path)], text: '当前抄表数据导出'),
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(

@@ -1,3 +1,5 @@
+import 'dart:ui' show Locale;
+
 import 'package:flutter/foundation.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
@@ -33,8 +35,9 @@ class CaptureLocationService {
         );
       }
 
-      await setLocaleIdentifier('zh_CN');
-      final placemarks = await placemarkFromCoordinates(
+      final placemarks =
+          await Geocoding(locale: const Locale('zh', 'CN'))
+              .placemarkFromCoordinates(
         position.latitude,
         position.longitude,
       );

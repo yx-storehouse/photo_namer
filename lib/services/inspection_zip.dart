@@ -25,11 +25,11 @@ Future<Map<String, dynamic>> createInspectionZipInBackground(
       if (!file.existsSync()) {
         continue;
       }
-      encoder.addFile(file);
+      encoder.addFileSync(file);
       addedCount++;
     }
   } finally {
-    encoder.close();
+    encoder.closeSync();
   }
 
   return <String, dynamic>{'zipPath': zipPath, 'addedCount': addedCount};
